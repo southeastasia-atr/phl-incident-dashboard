@@ -337,6 +337,65 @@
         });
     }
 
+    // ── SCHEMA / VOCAB LOADER ──────────────────────────────────────
+    // Loads schema.json plus any vocab files it references (e.g. Actor Type,
+    // Convergence controlled vocabularies). This step ONLY proves the loader
+    // works — SCHEMA is populated and logged, but nothing downstream reads
+    // from it yet. All existing hardcoded rendering logic below is untouched.
+    // A later step replaces those hardcoded pieces with reads from SCHEMA.
+    var SCHEMA = null;
+
+    function loadSchema() {
+      return fetch('schema.json')
+        .then(function(response) {
+          if (!response.ok) throw new Error('schema.json fetch failed: ' + response.status);
+          return response.json();
+        })
+        .then(function(schema) {
+          // Collect every distinct vocab file path referenced anywhere in the schema
+          var vocabPaths = new Set();
+          (schema.columns || []).forEach(function(col) {
+            if (col.vocab) vocabPaths.add(col.vocab);
+          });
+          if (schema.filters && schema.filters.multiSelect) {
+            schema.filters.multiSelect.forEach(function(f) {
+              if (f.vocab) vocabPaths.add(f.vocab);
+            });
+          }
+
+          schema.vocabs = {}; // resolved: vocab file path -> array of values
+
+          return Promise.all(
+            Array.from(vocabPaths).map(function(path) {
+              return fetch(path)
+                .then(function(r) {
+                  if (!r.ok) throw new Error('vocab fetch failed: ' + path + ' (' + r.status + ')');
+                  return r.json();
+                })
+                .then(function(vocabJson) {
+                  schema.vocabs[path] = vocabJson.values || [];
+                })
+                .catch(function(err) {
+                  console.error('Vocab load error:', path, err);
+                  schema.vocabs[path] = []; // fail soft — empty vocab, not a crash
+                });
+            })
+          ).then(function() {
+            return schema;
+          });
+        });
+    }
+
+    loadSchema().then(function(schema) {
+      SCHEMA = schema;
+      console.log('Loaded schema.json:', SCHEMA);
+      console.log('Loaded vocabs:', SCHEMA.vocabs);
+    }).catch(function(err) {
+      // Fail soft: schema load failure doesn't block the existing dashboard,
+      // which still runs entirely on hardcoded logic at this stage.
+      console.error('Schema load error (dashboard continues on hardcoded logic for now):', err);
+    });
+
     // STEP 5: LOAD & PARSE ALL COUNTRY CSVs
     Promise.all(
       COUNTRY_SOURCES.map(function(src) {

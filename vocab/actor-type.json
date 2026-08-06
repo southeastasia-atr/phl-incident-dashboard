@@ -1,0 +1,19 @@
+{
+  "$comment": "Controlled vocabulary for the Actor Type column. Referenced by schema.json's columns[].vocab and filters.multiSelect[].vocab — single source of truth, no more duplication across buildFilters() and switchCountry().",
+  "values": [
+    "NSAG",
+    "Police",
+    "Military",
+    "Other State Agency",
+    "State Auxiliary",
+    "Political Affiliate",
+    "Gang",
+    "Civilian Official",
+    "Communal/Political Militia",
+    "Criminal Organization",
+    "Criminal Individual",
+    "Civilian Community",
+    "Unknown/Unaffiliated Entity",
+    "Former police/soldier"
+  ]
+}
