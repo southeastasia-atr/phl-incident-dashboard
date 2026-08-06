@@ -386,6 +386,26 @@
         });
     }
 
+    // Fallback used only if schema.json/vocab files fail to load — the exact
+    // same 14-category list that used to be hardcoded (in two places) in
+    // buildFilters() and switchCountry(). getActorTypeVocab() below looks up
+    // the live vocab file via the column definition rather than a hardcoded
+    // path, so this fallback is the only place the list is spelled out now.
+    var ACTOR_TYPE_FALLBACK = [
+      'NSAG','Police','Military','Other State Agency','State Auxiliary',
+      'Political Affiliate','Gang','Civilian Official',
+      'Communal/Political Militia','Criminal Organization','Criminal Individual',
+      'Civilian Community','Unknown/Unaffiliated Entity','Former police/soldier',
+    ];
+
+    function getActorTypeVocab() {
+      if (!SCHEMA) return ACTOR_TYPE_FALLBACK;
+      var colDef = (SCHEMA.columns || []).filter(function(c) { return c.name === 'Actor Type'; })[0];
+      var path = colDef && colDef.vocab;
+      var list = path && SCHEMA.vocabs && SCHEMA.vocabs[path];
+      return (list && list.length) ? list : ACTOR_TYPE_FALLBACK;
+    }
+
     // ── GENERIC CATEGORICAL-POINTS LAYER FACTORY ──────────────────────
     // Produces a schema-driven layer: points colored by a category column,
     // with a toggleable legend, filtering, and a dimmed cross-country
@@ -985,13 +1005,7 @@
       });
       buildMultiSelect('tag', 'msTag', Object.keys(tagSet).sort(), 'All tags');
 
-      var ACTOR_TYPES = [
-        'NSAG','Police','Military','Other State Agency','State Auxiliary',
-        'Political Affiliate','Gang','Civilian Official',
-        'Communal/Political Militia','Criminal Organization','Criminal Individual',
-        'Civilian Community','Unknown/Unaffiliated Entity','Former police/soldier',
-      ];
-      buildMultiSelect('actor', 'msActor', ACTOR_TYPES, 'All actor types');
+      buildMultiSelect('actor', 'msActor', getActorTypeVocab(), 'All actor types');
 
       // Reset incident-type legend so it re-derives from the new country's types
       incidentsLayer.clearActive();
@@ -1127,13 +1141,7 @@
       });
       buildMultiSelect('tag', 'msTag', Object.keys(tagSet).sort(), 'All tags');
 
-      var ACTOR_TYPES = [
-        'NSAG','Police','Military','Other State Agency','State Auxiliary',
-        'Political Affiliate','Gang','Civilian Official',
-        'Communal/Political Militia','Criminal Organization','Criminal Individual',
-        'Civilian Community','Unknown/Unaffiliated Entity','Former police/soldier',
-      ];
-      buildMultiSelect('actor', 'msActor', ACTOR_TYPES, 'All actor types');
+      buildMultiSelect('actor', 'msActor', getActorTypeVocab(), 'All actor types');
 
       ['filterDateFrom','filterDateTo','filterSearch'].forEach(function(id){
         document.getElementById(id).addEventListener('input', applyFilters);
