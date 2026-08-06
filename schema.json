@@ -127,6 +127,7 @@
       "sections": [
         {
           "title": "Weapons",
+          "rowLayout": "nowrap",
           "charts": [
             { "id": "chartFirearms", "kind": "horiz-bar", "title": "Firearms by Type",
               "groups": [
