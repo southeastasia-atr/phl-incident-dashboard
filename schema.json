@@ -87,6 +87,14 @@
       "popupFields": ["Date", "Location", "Arms Score", "Convergence"]
     },
     {
+      "type": "weighted-heatmap",
+      "id": "arms-score",
+      "label": "Arms Score",
+      "column": "Arms Score",
+      "maxWeight": 50,
+      "legendCaption": "Weighted by Arms Score per incident"
+    },
+    {
       "type": "categorical-points",
       "id": "crime-convergence",
       "label": "Crime Convergence",
@@ -102,14 +110,6 @@
       },
       "defaultColor": "#8b949e",
       "popupFields": ["Incident Type", "Date", "Location"]
-    },
-    {
-      "type": "weighted-heatmap",
-      "id": "arms-score",
-      "label": "Arms Score",
-      "column": "Arms Score",
-      "maxWeight": 50,
-      "legendCaption": "Weighted by Arms Score per incident"
     },
     {
       "type": "metrics",

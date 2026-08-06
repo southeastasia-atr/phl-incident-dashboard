@@ -68,21 +68,9 @@
     <!-- Map panel -->
     <section class="map-panel">
 
-      <!-- Layer switcher: top strip inside map panel -->
-      <div class="layer-switcher" id="layerSwitcher">
-        <label class="layer-btn active" data-layer="incidents">
-          <input type="radio" name="layer" value="incidents" checked /> Incidents
-        </label>
-        <label class="layer-btn" data-layer="arms-score">
-          <input type="radio" name="layer" value="arms-score" /> Arms Score
-        </label>
-        <label class="layer-btn" data-layer="crime-convergence">
-          <input type="radio" name="layer" value="crime-convergence" /> Crime Convergence
-        </label>
-        <label class="layer-btn" data-layer="metrics">
-          <input type="radio" name="layer" value="metrics" /> Metrics
-        </label>
-      </div>
+      <!-- Layer switcher: top strip inside map panel. Populated dynamically
+           from schema.layers by buildLayerNav() — see the JS below. -->
+      <div class="layer-switcher" id="layerSwitcher"></div>
 
       <!-- map and metrics share this space -->
       <div class="map-content">
@@ -817,6 +805,35 @@
 
     var incidentsLayer, convergenceLayer, armsHeatmapLayer;
 
+    // layerControllers maps a schema layer's id -> { activate, deactivate }.
+    // buildLayerNav()'s tab-click handler dispatches through this registry
+    // instead of hardcoded id checks, so adding a layer in schema.json is
+    // enough to wire up its tab — no JS changes needed for a new instance of
+    // a layer type that's already supported.
+    var layerControllers = {};
+
+    // Any categorical-points layer beyond the first ("incidents", the base
+    // layer everything else overlays) follows this same activate/deactivate
+    // pattern — this generalizes what used to be Crime-Convergence-specific
+    // code (activateConvergenceTab/deactivateConvergenceTab) so a future
+    // second or third overlay layer (e.g. Venue Type, Target Type) can reuse
+    // it directly rather than needing its own hand-written copy.
+    function activateOverlayCategoricalLayer(layer, baseLayer) {
+      baseLayer.setVisible(false);
+      layer.add(currentFilteredRows, allIncidents);
+      layer.update(currentFilteredRows);
+      layer.setVisible(true);
+      layer.buildLegend(currentFilteredRows);
+      layer.applyFilter();
+    }
+
+    function deactivateOverlayCategoricalLayer(layer, baseLayer) {
+      layer.setVisible(false);
+      baseLayer.setVisible(true);
+      layer.clearHoverPopup();
+      layer.showAll();
+    }
+
     function buildMapLayers(schema) {
       var layerDefs = (schema.layers || []).filter(function(l) { return l.type === 'categorical-points'; });
 
@@ -854,7 +871,7 @@
 
       // Weighted-heatmap is optional — a client schema with no numeric score
       // column simply omits this layer type, and armsHeatmapLayer stays
-      // undefined. The layer-tab radio handler guards every call accordingly.
+      // undefined; it's just never added to layerControllers below.
       var heatmapDef = (schema.layers || []).filter(function(l) { return l.type === 'weighted-heatmap'; })[0];
       if (heatmapDef) {
         armsHeatmapLayer = createWeightedHeatmapLayer({
@@ -865,6 +882,72 @@
           sourceLayer: incidentsLayer,
         });
       }
+
+      // Wire the controller registry. 'metrics' is intentionally absent —
+      // it swaps the whole panel (map <-> charts) rather than toggling a map
+      // layer, so it's handled as its own case in buildLayerNav() below.
+      layerControllers = {};
+      layerControllers[incidentsDef.id] = {
+        activate: function() { buildLegend(); applyIncidentTypeFilter(); },
+        deactivate: function() { incidentsLayer.showAll(); applyIncidentTypeFilter(); },
+      };
+      layerControllers[convergenceDef.id] = {
+        activate: function() { activateOverlayCategoricalLayer(convergenceLayer, incidentsLayer); },
+        deactivate: function() { deactivateOverlayCategoricalLayer(convergenceLayer, incidentsLayer); },
+      };
+      if (heatmapDef && armsHeatmapLayer) {
+        layerControllers[heatmapDef.id] = {
+          activate: function() { armsHeatmapLayer.activate(); },
+          deactivate: function() { armsHeatmapLayer.deactivate(); },
+        };
+      }
+    }
+
+    // Generates the tab strip from schema.layers (in array order) and wires
+    // its click handling through layerControllers, so a layer added to or
+    // removed from schema.json changes the tabs with no JS edits needed.
+    function buildLayerNav(schema) {
+      var nav = document.getElementById('layerSwitcher');
+      var defs = schema.layers || [];
+
+      nav.innerHTML = defs.map(function(def, i) {
+        var extraClass = i === 0 ? ' active' : '';
+        var checked = i === 0 ? ' checked' : '';
+        return '<label class="layer-btn' + extraClass + '" data-layer="' + escHtml(def.id) + '">' +
+          '<input type="radio" name="layer" value="' + escHtml(def.id) + '"' + checked + ' /> ' + escHtml(def.label || def.id) +
+          '</label>';
+      }).join('');
+
+      nav.querySelectorAll('.layer-btn input').forEach(function(radio) {
+        radio.addEventListener('change', function(e) {
+          nav.querySelectorAll('.layer-btn').forEach(function(b) { b.classList.remove('active'); });
+          e.target.closest('.layer-btn').classList.add('active');
+          var val = e.target.value;
+          var metricsPanel = document.getElementById('metricsPanel');
+          var mapEl = document.getElementById('map');
+          var legend = document.getElementById('mapLegend');
+
+          // Deactivate every other registered layer, regardless of which was
+          // previously active — each deactivate() is safe to call even if
+          // that layer was never activated (matches the original behavior).
+          Object.keys(layerControllers).forEach(function(id) {
+            if (id !== val) layerControllers[id].deactivate();
+          });
+
+          if (val === 'metrics') {
+            metricsPanel.style.display = 'block';
+            mapEl.style.display = 'none';
+            if (legend) legend.style.display = 'none';
+            renderMetrics(currentFilteredRows);
+          } else {
+            metricsPanel.style.display = 'none';
+            mapEl.style.display = 'block';
+            if (legend) legend.style.display = '';
+            if (window.map) map.resize();
+            if (layerControllers[val]) layerControllers[val].activate();
+          }
+        });
+      });
     }
 
     var schemaPromise = loadSchema().catch(function(err) {
@@ -896,6 +979,7 @@
       console.log('Loaded vocabs:', SCHEMA.vocabs);
 
       buildMapLayers(SCHEMA);
+      buildLayerNav(SCHEMA); // generate the tab strip from schema.layers
       buildTableHead(); // generate <thead> from schema.table.columns before first render
 
       var combined = [].concat.apply([], rowsByCountry);
@@ -1461,83 +1545,19 @@ if (lines.length === 1) lines = text.split(/;/).map(function(s){ return s.trim()
     // rather than static HTML — see buildTableHead() above.
 
     // ── ARMS SCORE HEATMAP ──────────────────────────────────────
-    // Thin wrappers around armsHeatmapLayer (a createWeightedHeatmapLayer
-    // instance — see buildMapLayers() above). Guarded with `if
-    // (armsHeatmapLayer)` since a client schema without a weighted-heatmap
-    // layer leaves it undefined and this tab simply has nothing to activate.
-    function activateArmsScoreTab() {
-      if (armsHeatmapLayer) armsHeatmapLayer.activate();
-    }
-
+    // updateArmsHeatmap is still called from applyFilters() below to refresh
+    // the heatmap when filters change. Activation/deactivation is now
+    // dispatched through layerControllers (see buildMapLayers() and
+    // buildLayerNav() above) instead of dedicated wrapper functions.
     function updateArmsHeatmap(rows) {
       if (armsHeatmapLayer) armsHeatmapLayer.update(rows);
     }
 
-    function deactivateArmsScoreTab() {
-      if (armsHeatmapLayer) armsHeatmapLayer.deactivate();
-    }
-
-    // ── CRIME CONVERGENCE LAYER ──────────────────────────────────
-    // Thin wrappers around convergenceLayer (a createCategoricalLayer
-    // instance — see buildMapLayers() above). All the source/layer creation,
-    // hover/click popups, legend, and filtering logic that used to be
-    // hand-written here now lives once, shared with the Incidents layer.
-    function activateConvergenceTab() {
-      incidentsLayer.setVisible(false);
-      convergenceLayer.add(currentFilteredRows, allIncidents);
-      convergenceLayer.update(currentFilteredRows);
-      convergenceLayer.setVisible(true);
-      convergenceLayer.buildLegend(currentFilteredRows);
-      convergenceLayer.applyFilter();
-    }
-
-    function deactivateConvergenceTab() {
-      convergenceLayer.setVisible(false);
-      incidentsLayer.setVisible(true);
-      convergenceLayer.clearHoverPopup();
-      convergenceLayer.resetToFullVocab();
-    }
-    document.querySelectorAll('.layer-btn input').forEach(function(radio) {
-      radio.addEventListener('change', function(e) {
-        document.querySelectorAll('.layer-btn').forEach(function(b) { b.classList.remove('active'); });
-        e.target.closest('.layer-btn').classList.add('active');
-        var val = e.target.value;
-        var metricsPanel = document.getElementById('metricsPanel');
-        var mapEl = document.getElementById('map');
-        var legend = document.getElementById('mapLegend');
-
-        // Deactivate arms score if leaving that tab
-        if (val !== 'arms-score') deactivateArmsScoreTab();
-        // Deactivate convergence if leaving that tab
-        if (val !== 'crime-convergence') deactivateConvergenceTab();
-        // Reset incident type filter when leaving that tab
-        if (val !== 'incidents') {
-          incidentsLayer.showAll();
-          applyIncidentTypeFilter();
-        }
-
-        if (val === 'metrics') {
-          metricsPanel.style.display = 'block';
-          mapEl.style.display = 'none';
-          if (legend) legend.style.display = 'none';
-          renderMetrics(currentFilteredRows);
-        } else {
-          metricsPanel.style.display = 'none';
-          mapEl.style.display = 'block';
-          if (legend) legend.style.display = '';
-          if (window.map) map.resize();
-
-          if (val === 'arms-score') {
-            activateArmsScoreTab();
-          } else if (val === 'incidents') {
-            buildLegend(); // restore incident type legend + re-apply any active filter
-            applyIncidentTypeFilter();
-          } else if (val === 'crime-convergence') {
-            activateConvergenceTab();
-          }
-        }
-      });
-    });
+    // Crime Convergence and Arms Score tab activation/deactivation are now
+    // dispatched generically through layerControllers, built in
+    // buildMapLayers() and wired to the tab strip in buildLayerNav() (both
+    // above) — see activateOverlayCategoricalLayer() for what used to be
+    // Convergence-specific activateConvergenceTab()/deactivateConvergenceTab().
 
     // ── METRICS ─────────────────────────────────────────────────
 
