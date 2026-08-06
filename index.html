@@ -391,11 +391,7 @@
     ];
 
     function getActorTypeVocab() {
-      if (!SCHEMA) return ACTOR_TYPE_FALLBACK;
-      var colDef = (SCHEMA.columns || []).filter(function(c) { return c.name === 'Actor Type'; })[0];
-      var path = colDef && colDef.vocab;
-      var list = path && SCHEMA.vocabs && SCHEMA.vocabs[path];
-      return (list && list.length) ? list : ACTOR_TYPE_FALLBACK;
+      return getVocabForColumn('Actor Type') || ACTOR_TYPE_FALLBACK;
     }
 
     // ── GENERIC CATEGORICAL-POINTS LAYER FACTORY ──────────────────────
@@ -1548,26 +1544,63 @@ if (lines.length === 1) lines = text.split(/;/).map(function(s){ return s.trim()
     var currentFilteredRows = [];
     var metricsCharts = {};
 
-    var FIREARM_GROUPS = [
-      { label: 'Unspecified',      cols: ['Unspecified'] },
-      { label: 'Handgun',          cols: ['Pistol', 'Revolver', 'Craft handgun'] },
-      { label: 'Assault Rifle',    cols: ['Assault Rifle'] },
-      { label: 'Rifle',            cols: ['Rifle', 'Craft Rifle'] },
-      { label: 'Shotgun',          cols: ['Shotgun', 'Craft Shotgun'] },
-      { label: 'Submachine Gun',   cols: ['SMG', 'Craft SMG'] },
-      { label: 'Machine Gun',      cols: ['LMG', 'HMG'] },
-      { label: 'Grenade Launcher', cols: ['GL', 'AGL'] },
-      { label: 'Anti-tank',        cols: ['RPG/ATW', 'Craft RPG'] },
-      { label: 'Mortar',           cols: ['Mortar'] },
-      { label: 'Advanced Weapon',  cols: ['ATGM', 'MANPADS'] },
+    // Fallback used only if schema.json fails to load — SEA's exact original
+    // 7-chart layout, reconstructed as chart definitions in the same shape
+    // schema.json's metrics.sections uses. Everything below reads chart
+    // definitions from SCHEMA when available and falls back to this only on
+    // load failure, so this list is not something future clients touch.
+    var FALLBACK_METRICS_SECTIONS = [
+      {
+        title: 'Weapons',
+        charts: [
+          { id: 'chartFirearms', kind: 'horiz-bar', groups: [
+            { label: 'Unspecified',      cols: ['Unspecified'] },
+            { label: 'Handgun',          cols: ['Pistol', 'Revolver', 'Craft handgun'] },
+            { label: 'Assault Rifle',    cols: ['Assault Rifle'] },
+            { label: 'Rifle',            cols: ['Rifle', 'Craft Rifle'] },
+            { label: 'Shotgun',          cols: ['Shotgun', 'Craft Shotgun'] },
+            { label: 'Submachine Gun',   cols: ['SMG', 'Craft SMG'] },
+            { label: 'Machine Gun',      cols: ['LMG', 'HMG'] },
+            { label: 'Grenade Launcher', cols: ['GL', 'AGL'] },
+            { label: 'Anti-tank',        cols: ['RPG/ATW', 'Craft RPG'] },
+            { label: 'Mortar',           cols: ['Mortar'] },
+            { label: 'Advanced Weapon',  cols: ['ATGM', 'MANPADS'] },
+          ] },
+          { id: 'chartGrenades', kind: 'horiz-bar', color: '#c0392b', groups: [
+            { label: 'Hand Grenade',      cols: ['Hand Grenade'] },
+            { label: 'Projected Grenade', cols: ['Projected Gren'] },
+            { label: 'Rifle Grenade',     cols: ['Rifle Gren'] },
+            { label: 'Munition',          cols: ['Munition'] },
+          ] },
+          { id: 'chartAmmo', kind: 'single-bar', column: 'Ammo' },
+        ]
+      },
+      {
+        title: 'Incidents',
+        charts: [
+          { id: 'chartIncidentType', kind: 'pie', column: 'Incident Type' },
+          { id: 'chartConvergence', kind: 'horiz-bar', column: 'Convergence', color: '#4d90c4' },
+        ]
+      },
+      {
+        title: 'Geography',
+        charts: [
+          { id: 'chartProvinces', kind: 'vert-bar', column: 'Location', aggregate: 'count', limit: 10, groupByLastSegment: true },
+          { id: 'chartArmsScore', kind: 'vert-bar', column: 'Location', aggregate: 'sum', sumColumn: 'Arms Score', limit: 10, groupByLastSegment: true, roundSum: true },
+        ]
+      },
     ];
 
-    var GRENADE_GROUPS = [
-      { label: 'Hand Grenade',      cols: ['Hand Grenade'] },
-      { label: 'Projected Grenade', cols: ['Projected Gren'] },
-      { label: 'Rifle Grenade',     cols: ['Rifle Gren'] },
-      { label: 'Munition',          cols: ['Munition'] },
-    ];
+    // Generalizes getActorTypeVocab()'s lookup to any column with a `vocab`
+    // reference in schema.columns — used by chart kinds that need to match
+    // free-text values against a controlled vocabulary (e.g. Convergence).
+    function getVocabForColumn(columnName) {
+      if (!SCHEMA) return null;
+      var colDef = (SCHEMA.columns || []).filter(function(c) { return c.name === columnName; })[0];
+      var path = colDef && colDef.vocab;
+      var list = path && SCHEMA.vocabs && SCHEMA.vocabs[path];
+      return (list && list.length) ? list : null;
+    }
 
     function sumGroups(rows, groups) {
       return groups.map(function(g) {
@@ -1591,6 +1624,55 @@ if (lines.length === 1) lines = text.split(/;/).map(function(s){ return s.trim()
       return total;
     }
 
+    // Counts distinct values in a column. If vocabList is given, values are
+    // matched against it (case-insensitive prefix match, handles multi-value
+    // fields split on comma/semicolon/newline) rather than counted verbatim —
+    // this is how Convergence's free-text field maps to its 7 categories.
+    function countCategorical(rows, column, vocabList) {
+      var counts = {};
+      if (vocabList) {
+        rows.forEach(function(r) {
+          (r[column] || '').trim().split(/[,;\n\r]+/).forEach(function(c) {
+            c = c.trim();
+            if (!c) return;
+            var match = vocabList.filter(function(cat) { return c.toLowerCase().startsWith(cat.toLowerCase()); })[0];
+            if (match) counts[match] = (counts[match] || 0) + 1;
+          });
+        });
+      } else {
+        rows.forEach(function(r) {
+          var t = (r[column] || 'Unknown').trim();
+          counts[t] = (counts[t] || 0) + 1;
+        });
+      }
+      return Object.entries(counts).sort(function(a,b){ return b[1]-a[1]; });
+    }
+
+    // vert-bar aggregation: count or sum, grouped by a column's raw value —
+    // or, for SEA's two Geography charts specifically, by the last
+    // comma-separated segment of Location (a province/city proxy; see the
+    // groupByLastSegment comment in schema.json — this is a SEA-specific
+    // convenience, not a default every client's vert-bar charts would want).
+    function computeVertBarData(rows, chartDef) {
+      var totals = {};
+      rows.forEach(function(row) {
+        var raw = (row[chartDef.column] || '').trim();
+        if (!raw) return;
+        var key = chartDef.groupByLastSegment ? raw.split(',').pop().trim() : raw;
+        if (!key) return;
+        if (chartDef.aggregate === 'sum') {
+          var v = parseFloat(row[chartDef.sumColumn]);
+          if (isNaN(v)) return;
+          totals[key] = (totals[key] || 0) + v;
+        } else {
+          totals[key] = (totals[key] || 0) + 1;
+        }
+      });
+      var entries = Object.entries(totals).sort(function(a,b){ return b[1]-a[1]; });
+      if (chartDef.limit) entries = entries.slice(0, chartDef.limit);
+      return entries;
+    }
+
     function destroyChart(id) {
       if (metricsCharts[id]) { metricsCharts[id].destroy(); delete metricsCharts[id]; }
     }
@@ -1602,12 +1684,43 @@ if (lines.length === 1) lines = text.split(/;/).map(function(s){ return s.trim()
       blue: '#4d90c4',
     };
 
+    // Root-cause fix: the old code replaced the canvas's own parentNode
+    // innerHTML with the "No data" message, which deleted the <canvas>
+    // element from the DOM entirely. The next render call could never find
+    // it again (getElementById returned null), so a chart that ever showed
+    // "No data" was stuck that way permanently, even after the filter that
+    // caused it was changed or removed. These two helpers hide/show the
+    // canvas instead of destroying it, so every render can recover.
+    function showChartEmpty(canvasId, message) {
+      var ctx = document.getElementById(canvasId);
+      if (!ctx) return;
+      ctx.style.display = 'none';
+      var wrap = ctx.parentNode;
+      var empty = wrap.querySelector('.metrics-empty');
+      if (!empty) {
+        empty = document.createElement('div');
+        empty.className = 'metrics-empty';
+        wrap.appendChild(empty);
+      }
+      empty.textContent = message;
+    }
+
+    function clearChartEmpty(canvasId) {
+      var ctx = document.getElementById(canvasId);
+      if (!ctx) return;
+      ctx.style.display = '';
+      var wrap = ctx.parentNode;
+      var empty = wrap.querySelector('.metrics-empty');
+      if (empty) empty.remove();
+    }
+
     function makeHorizBar(canvasId, labels, data, color) {
       destroyChart(canvasId);
       var ctx = document.getElementById(canvasId);
       if (!ctx) return;
+      clearChartEmpty(canvasId);
       var pairs = labels.map(function(l,i){ return {l:l,v:data[i]}; }).filter(function(p){ return p.v > 0; });
-      if (!pairs.length) { ctx.parentNode.innerHTML = '<div class="metrics-empty">No data</div>'; return; }
+      if (!pairs.length) { showChartEmpty(canvasId, 'No data'); return; }
       pairs.sort(function(a,b){ return b.v - a.v; });
       metricsCharts[canvasId] = new Chart(ctx, {
         type: 'bar',
@@ -1625,7 +1738,8 @@ if (lines.length === 1) lines = text.split(/;/).map(function(s){ return s.trim()
       destroyChart(canvasId);
       var ctx = document.getElementById(canvasId);
       if (!ctx) return;
-      if (!data.some(function(v){return v>0;})) { ctx.parentNode.innerHTML = '<div class="metrics-empty">No data</div>'; return; }
+      clearChartEmpty(canvasId);
+      if (!data.some(function(v){return v>0;})) { showChartEmpty(canvasId, 'No data'); return; }
       metricsCharts[canvasId] = new Chart(ctx, {
         type: 'bar',
         data: { labels: labels, datasets: [{ data: data, backgroundColor: colors||CHART_DEFAULTS.accent, borderRadius: 3, borderSkipped: false }] },
@@ -1642,7 +1756,8 @@ if (lines.length === 1) lines = text.split(/;/).map(function(s){ return s.trim()
       destroyChart(canvasId);
       var ctx = document.getElementById(canvasId);
       if (!ctx) return;
-      if (!data.some(function(v){return v>0;})) { ctx.parentNode.innerHTML = '<div class="metrics-empty">No data</div>'; return; }
+      clearChartEmpty(canvasId);
+      if (!data.some(function(v){return v>0;})) { showChartEmpty(canvasId, 'No data'); return; }
       var PIE_COLORS = ['#e8962a','#4d90c4','#00b050','#e53935','#cc00cc','#9b59b6','#4472c4','#c8a800','#e91e63','#888888','#3a7abf','#d4791e'];
       metricsCharts[canvasId] = new Chart(ctx, {
         type: 'pie',
@@ -1657,7 +1772,8 @@ if (lines.length === 1) lines = text.split(/;/).map(function(s){ return s.trim()
       destroyChart(canvasId);
       var ctx = document.getElementById(canvasId);
       if (!ctx) return;
-      if (!value) { ctx.parentNode.innerHTML = '<div class="metrics-empty">No data</div>'; return; }
+      clearChartEmpty(canvasId);
+      if (!value) { showChartEmpty(canvasId, 'No data'); return; }
       metricsCharts[canvasId] = new Chart(ctx, {
         type: 'bar',
         data: { labels: ['Rounds / items'], datasets: [{ data: [value], backgroundColor: CHART_DEFAULTS.blue, borderRadius: 4, borderSkipped: false }] },
@@ -1670,66 +1786,44 @@ if (lines.length === 1) lines = text.split(/;/).map(function(s){ return s.trim()
       });
     }
 
+    // Computes and draws one chart from its schema definition. Unrecognized
+    // kinds (line, stacked-bar — documented in schema.json but not yet
+    // implemented, since SEA doesn't use them) are skipped with a console
+    // warning rather than breaking the rest of the panel.
+    function renderChartFromDef(chartDef, rows) {
+      var id = chartDef.id;
+      if (chartDef.kind === 'horiz-bar') {
+        var entries = chartDef.groups
+          ? sumGroups(rows, chartDef.groups).map(function(d){ return [d.label, d.value]; })
+          : countCategorical(rows, chartDef.column, getVocabForColumn(chartDef.column));
+        makeHorizBar(id, entries.map(function(e){return e[0];}), entries.map(function(e){return e[1];}), chartDef.color || CHART_DEFAULTS.accent);
+      } else if (chartDef.kind === 'vert-bar') {
+        var entries = computeVertBarData(rows, chartDef);
+        var labels = entries.map(function(e){ return e[0]; });
+        var data = entries.map(function(e){ return chartDef.roundSum ? Math.round(e[1]) : e[1]; });
+        var colors = labels.map(function(_,i){ return i%2===0 ? CHART_DEFAULTS.accent : CHART_DEFAULTS.blue; });
+        makeVertBar(id, labels, data, colors);
+      } else if (chartDef.kind === 'pie') {
+        var entries = countCategorical(rows, chartDef.column, getVocabForColumn(chartDef.column));
+        makePie(id, entries.map(function(e){return e[0];}), entries.map(function(e){return e[1];}));
+      } else if (chartDef.kind === 'single-bar') {
+        makeSingleBar(id, sumCol(rows, chartDef.column));
+      } else {
+        console.warn('Chart kind not yet implemented, skipping:', chartDef.kind, id);
+      }
+    }
+
     function renderMetrics(rows) {
       if (!rows || !rows.length) rows = incidents;
 
-      var firearmData = sumGroups(rows, FIREARM_GROUPS);
-      makeHorizBar('chartFirearms', firearmData.map(function(d){return d.label;}), firearmData.map(function(d){return d.value;}), CHART_DEFAULTS.accent);
+      var metricsDef = ((SCHEMA && SCHEMA.layers) || []).filter(function(l) { return l.type === 'metrics'; })[0];
+      var sections = (metricsDef && metricsDef.sections) || FALLBACK_METRICS_SECTIONS;
 
-      var grenadeData = sumGroups(rows, GRENADE_GROUPS);
-      makeHorizBar('chartGrenades', grenadeData.map(function(d){return d.label;}), grenadeData.map(function(d){return d.value;}), '#c0392b');
-
-      makeSingleBar('chartAmmo', sumCol(rows, 'Ammo'));
-
-      var typeCounts = {};
-      rows.forEach(function(r){ var t=(r['Incident Type']||'Unknown').trim(); typeCounts[t]=(typeCounts[t]||0)+1; });
-      var typeEntries = Object.entries(typeCounts).sort(function(a,b){return b[1]-a[1];});
-      makePie('chartIncidentType', typeEntries.map(function(e){return e[0];}), typeEntries.map(function(e){return e[1];}));
-
-      var CONVERGENCE_CATEGORIES = [
-        'Drug trafficking', 'Human trafficking', 'Wildlife trafficking',
-        'Illicit business', 'Environmental crime', 'Illicit goods', 'Criminal services'
-      ];
-      var convCounts = {};
-      rows.forEach(function(r){
-        (r['Convergence']||'').trim().split(/[,;\n\r]+/).forEach(function(c){
-          c = c.trim();
-          if (!c) return;
-          var match = CONVERGENCE_CATEGORIES.find(function(cat){ return c.toLowerCase().startsWith(cat.toLowerCase()); });
-          if (match) convCounts[match] = (convCounts[match]||0) + 1;
+      sections.forEach(function(section) {
+        (section.charts || []).forEach(function(chartDef) {
+          renderChartFromDef(chartDef, rows);
         });
       });
-      var convEntries = Object.entries(convCounts).sort(function(a,b){return b[1]-a[1];});
-      if (convEntries.length) makeHorizBar('chartConvergence', convEntries.map(function(e){return e[0];}), convEntries.map(function(e){return e[1];}), CHART_DEFAULTS.blue);
-      else { var el=document.getElementById('chartConvergence'); if(el) el.parentNode.innerHTML='<div class="metrics-empty">No convergence data</div>'; }
-
-      // Extract the last comma-separated segment of Location as a proxy for province/city
-      var provCounts = {};
-      rows.forEach(function(r){
-        var loc = (r['Location']||'').trim();
-        if (!loc) return;
-        // Take the last segment after the final comma as the broadest geographic unit
-        var parts = loc.split(',');
-        var p = parts[parts.length - 1].trim();
-        if (p) provCounts[p] = (provCounts[p]||0) + 1;
-      });
-      var provEntries = Object.entries(provCounts).sort(function(a,b){return b[1]-a[1];}).slice(0,10);
-      if (provEntries.length) makeVertBar('chartProvinces', provEntries.map(function(e){return e[0];}), provEntries.map(function(e){return e[1];}), provEntries.map(function(_,i){return i%2===0?CHART_DEFAULTS.accent:CHART_DEFAULTS.blue;}));
-      else { var el=document.getElementById('chartProvinces'); if(el) el.parentNode.innerHTML='<div class=\"metrics-empty\">No location data</div>'; }
-
-      // Top 10 locations by Arms Score sum
-      var armsByLoc = {};
-      rows.forEach(function(r){
-        var loc = (r['Location']||'').trim();
-        var score = parseFloat(r['Arms Score']);
-        if (!loc || isNaN(score)) return;
-        var parts = loc.split(',');
-        var p = parts[parts.length - 1].trim();
-        if (p) armsByLoc[p] = (armsByLoc[p]||0) + score;
-      });
-      var armsEntries = Object.entries(armsByLoc).sort(function(a,b){return b[1]-a[1];}).slice(0,10);
-      if (armsEntries.length) makeVertBar('chartArmsScore', armsEntries.map(function(e){return e[0];}), armsEntries.map(function(e){return Math.round(e[1]);}), armsEntries.map(function(_,i){return i%2===0?CHART_DEFAULTS.accent:CHART_DEFAULTS.blue;}));
-      else { var el2=document.getElementById('chartArmsScore'); if(el2) el2.parentNode.innerHTML='<div class=\"metrics-empty\">No arms score data</div>'; }
     }
   </script>
 

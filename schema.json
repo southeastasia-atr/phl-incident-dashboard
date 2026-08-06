@@ -158,14 +158,15 @@
           "title": "Incidents",
           "charts": [
             { "id": "chartIncidentType", "kind": "pie", "title": "Incident Type Breakdown", "column": "Incident Type" },
-            { "id": "chartConvergence", "kind": "horiz-bar", "title": "Convergence Incidents by Category", "column": "Convergence" }
+            { "id": "chartConvergence", "kind": "horiz-bar", "title": "Convergence Incidents by Category", "column": "Convergence", "color": "#4d90c4" }
           ]
         },
         {
           "title": "Geography",
+          "$comment": "groupByLastSegment is a SEA-specific location-parsing convenience (splits 'Location' on commas and groups by the last segment as a province/city proxy) — NOT a generic vert-bar feature every client would want. A future client's schema would just group by the raw column value unless they opt into this flag too.",
           "charts": [
-            { "id": "chartProvinces", "kind": "vert-bar", "title": "Top 10 Locations by Incident Count", "column": "Location", "aggregate": "count", "limit": 10 },
-            { "id": "chartArmsScore", "kind": "vert-bar", "title": "Top 10 Locations by Arms Score", "column": "Location", "aggregate": "sum", "sumColumn": "Arms Score", "limit": 10 }
+            { "id": "chartProvinces", "kind": "vert-bar", "title": "Top 10 Locations by Incident Count", "column": "Location", "aggregate": "count", "limit": 10, "groupByLastSegment": true },
+            { "id": "chartArmsScore", "kind": "vert-bar", "title": "Top 10 Locations by Arms Score", "column": "Location", "aggregate": "sum", "sumColumn": "Arms Score", "limit": 10, "groupByLastSegment": true, "roundSum": true }
           ]
         }
       ]
