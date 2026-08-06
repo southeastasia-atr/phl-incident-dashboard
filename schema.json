@@ -1,0 +1,192 @@
+{
+  "$comment": "Schema for the schema-driven dashboard shell. Drives both dashboard rendering AND upload-portal validation. This instance is SEA's own configuration — the proof that the refactored shell reproduces current behavior.",
+
+  "meta": {
+    "title": "Incident Map",
+    "subtitle": "Philippines & Thailand",
+    "logo": "assets/logo.svg"
+  },
+
+  "dataSource": {
+    "type": "csv",
+    "encoding": "utf-8-sig",
+    "files": [
+      { "id": "PHL", "path": "PHLdata.csv", "label": "Philippines" },
+      { "id": "THA", "path": "THAdata.csv", "label": "Thailand" }
+    ],
+    "$comment": "Multiple files here is SEA's country split specifically — NOT a general 'grouping' feature. A single-country/single-org client would just have one entry in this array, and the country-nav UI + dimmed cross-source background layers simply don't render when there's only one."
+  },
+
+  "columns": [
+    { "name": "Code",          "type": "text",   "required": true,  "unique": true },
+    { "name": "Incident Type", "type": "text",   "required": true },
+    { "name": "Title",         "type": "text",   "required": true },
+    { "name": "Date",          "type": "date",   "required": true, "format": "DD Month YYYY" },
+    { "name": "Location",      "type": "text",   "required": false },
+    { "name": "Latitude",      "type": "number", "required": true, "range": [-90, 90] },
+    { "name": "Longitude",     "type": "number", "required": true, "range": [-180, 180] },
+    { "name": "Description",  "type": "text",   "required": false },
+    { "name": "Weapons",       "type": "text",   "required": false },
+    { "name": "Actor Type",    "type": "multi-text", "delimiter": "\n", "vocab": "vocab/actor-type.json" },
+    { "name": "Actors",        "type": "text",   "required": false },
+    { "name": "Tags",          "type": "multi-text", "delimiter": "," },
+    { "name": "Convergence",   "type": "multi-text", "delimiter": ",", "vocab": "vocab/convergence.json" },
+    { "name": "Arms Score",    "type": "number", "required": false, "min": 0 },
+    { "name": "Source",        "type": "text",   "required": false },
+    { "name": "Unspecified",   "type": "number" },
+    { "name": "Pistol",        "type": "number" },
+    { "name": "Revolver",      "type": "number" },
+    { "name": "Assault Rifle", "type": "number" },
+    { "name": "Rifle",         "type": "number" },
+    { "name": "Shotgun",       "type": "number" },
+    { "name": "SMG",           "type": "number" },
+    { "name": "LMG",           "type": "number" },
+    { "name": "HMG",           "type": "number" },
+    { "name": "GL",            "type": "number" },
+    { "name": "AGL",           "type": "number" },
+    { "name": "RPG/ATW",       "type": "number" },
+    { "name": "Mortar",        "type": "number" },
+    { "name": "ATGM",          "type": "number" },
+    { "name": "MANPADS",       "type": "number" },
+    { "name": "Hand Grenade",  "type": "number" },
+    { "name": "Projected Gren","type": "number" },
+    { "name": "Rifle Gren",    "type": "number" },
+    { "name": "Munition",      "type": "number" },
+    { "name": "Ammo",          "type": "number" },
+    { "name": "Craft handgun", "type": "number" },
+    { "name": "Craft Rifle",   "type": "number" },
+    { "name": "Craft Shotgun", "type": "number" },
+    { "name": "Craft SMG",     "type": "number" },
+    { "name": "Craft RPG",     "type": "number" }
+  ],
+
+  "map": {
+    "basemap": "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+    "initialView": { "center": [122.0, 12.5], "zoom": 5.5, "minZoom": 4, "maxZoom": 18 },
+    "clustering": { "enabled": false, "$comment": "Off for SEA's current scale. A global/high-density client schema would set enabled: true plus a radius threshold." }
+  },
+
+  "layers": [
+    {
+      "type": "categorical-points",
+      "id": "incidents",
+      "label": "Incidents",
+      "column": "Incident Type",
+      "colorMap": {
+        "Seizure": "#00b050",
+        "Diversion": "#e53935",
+        "Illicit transfer": "#cc00cc",
+        "Illicit use": "#c8a800",
+        "Illicit possession": "#c8a800",
+        "Illicit manufacture": "#ff9900",
+        "Destruction": "#4a4a4a",
+        "UXO": "#888888",
+        "Surrender/amnesty": "#4472c4"
+      },
+      "defaultColor": "#8b949e",
+      "popupFields": ["Date", "Location", "Arms Score", "Convergence"]
+    },
+    {
+      "type": "weighted-heatmap",
+      "id": "arms-score",
+      "label": "Arms Score",
+      "column": "Arms Score",
+      "maxWeight": 50,
+      "legendCaption": "Weighted by Arms Score per incident"
+    },
+    {
+      "type": "categorical-points",
+      "id": "crime-convergence",
+      "label": "Crime Convergence",
+      "column": "Convergence",
+      "colorMap": {
+        "Drug trafficking": "#e53935",
+        "Human trafficking": "#e91e63",
+        "Wildlife trafficking": "#00b050",
+        "Illicit business": "#c8a800",
+        "Environmental crime": "#4d90c4",
+        "Illicit goods": "#ff9900",
+        "Criminal services": "#9b59b6"
+      },
+      "defaultColor": "#8b949e",
+      "popupFields": ["Incident Type", "Date", "Location"]
+    },
+    {
+      "type": "metrics",
+      "id": "metrics",
+      "label": "Metrics",
+      "$comment": "This entire sections/charts list is SEA-specific and built to SEA's own preferences — it is NOT a template other clients inherit or start from. Each chart is fully self-describing, so a new client's metrics tab gets designed from scratch against what THEY want to track. A client could have zero, three, or fifteen charts, in whatever sections make sense for their data — the renderer just loops over whatever's declared here.",
+      "$supportedChartKinds": {
+        "horiz-bar":   { "needs": "groups[] (label+cols) OR column+aggregate", "example": "Firearms by Type" },
+        "vert-bar":    { "needs": "column+aggregate (count, or sum+sumColumn), optional limit", "example": "Top 10 Locations by Incident Count" },
+        "pie":         { "needs": "column (counts distinct values)", "example": "Incident Type Breakdown" },
+        "single-bar":  { "needs": "column (sums a numeric field to one value)", "example": "Ammunition" },
+        "line":        { "needs": "xColumn, optional xBucket (day/week/month/quarter/year), series[] (label+aggregate) OR seriesBy (splits into one line per category value)", "example": "Incidents Over Time" },
+        "stacked-bar": { "needs": "xColumn, optional xBucket, stackBy (segment column), aggregate (count, or sum+sumColumn), optional limit", "example": "Incidents by Month and Type" }
+      },
+      "sections": [
+        {
+          "title": "Weapons",
+          "rowLayout": "nowrap",
+          "charts": [
+            { "id": "chartFirearms", "kind": "horiz-bar", "title": "Firearms by Type",
+              "groups": [
+                { "label": "Unspecified",      "cols": ["Unspecified"] },
+                { "label": "Handgun",          "cols": ["Pistol", "Revolver", "Craft handgun"] },
+                { "label": "Assault Rifle",    "cols": ["Assault Rifle"] },
+                { "label": "Rifle",            "cols": ["Rifle", "Craft Rifle"] },
+                { "label": "Shotgun",          "cols": ["Shotgun", "Craft Shotgun"] },
+                { "label": "Submachine Gun",   "cols": ["SMG", "Craft SMG"] },
+                { "label": "Machine Gun",      "cols": ["LMG", "HMG"] },
+                { "label": "Grenade Launcher", "cols": ["GL", "AGL"] },
+                { "label": "Anti-tank",        "cols": ["RPG/ATW", "Craft RPG"] },
+                { "label": "Mortar",           "cols": ["Mortar"] },
+                { "label": "Advanced Weapon",  "cols": ["ATGM", "MANPADS"] }
+              ]
+            },
+            { "id": "chartGrenades", "kind": "horiz-bar", "title": "Grenades & Munitions by Type", "color": "#c0392b",
+              "groups": [
+                { "label": "Hand Grenade",      "cols": ["Hand Grenade"] },
+                { "label": "Projected Grenade", "cols": ["Projected Gren"] },
+                { "label": "Rifle Grenade",     "cols": ["Rifle Gren"] },
+                { "label": "Munition",          "cols": ["Munition"] }
+              ]
+            },
+            { "id": "chartAmmo", "kind": "single-bar", "title": "Ammunition", "column": "Ammo" }
+          ]
+        },
+        {
+          "title": "Incidents",
+          "charts": [
+            { "id": "chartIncidentType", "kind": "pie", "title": "Incident Type Breakdown", "column": "Incident Type" },
+            { "id": "chartConvergence", "kind": "horiz-bar", "title": "Convergence Incidents by Category", "column": "Convergence", "color": "#4d90c4" }
+          ]
+        },
+        {
+          "title": "Geography",
+          "$comment": "groupByLastSegment is a SEA-specific location-parsing convenience (splits 'Location' on commas and groups by the last segment as a province/city proxy) — NOT a generic vert-bar feature every client would want. A future client's schema would just group by the raw column value unless they opt into this flag too.",
+          "charts": [
+            { "id": "chartProvinces", "kind": "vert-bar", "title": "Top 10 Locations by Incident Count", "column": "Location", "aggregate": "count", "limit": 10, "groupByLastSegment": true },
+            { "id": "chartArmsScore", "kind": "vert-bar", "title": "Top 10 Locations by Arms Score", "column": "Location", "aggregate": "sum", "sumColumn": "Arms Score", "limit": 10, "groupByLastSegment": true, "roundSum": true }
+          ]
+        }
+      ]
+    }
+  ],
+
+  "table": {
+    "columns": ["Date", "Incident Type", "Title", "Location", "Arms Score"],
+    "expandFields": ["Description", "Weapons"],
+    "sourceColumn": "Source"
+  },
+
+  "filters": {
+    "dateColumn": "Date",
+    "search": ["Title", "Location", "Incident Type", "Tags", "Description", "Actors", "Weapons"],
+    "multiSelect": [
+      { "column": "Incident Type", "deriveFrom": "data", "label": "Type" },
+      { "column": "Tags",          "deriveFrom": "data", "label": "Tag" },
+      { "column": "Actor Type",    "deriveFrom": "vocab", "vocab": "vocab/actor-type.json" }
+    ]
+  }
+}

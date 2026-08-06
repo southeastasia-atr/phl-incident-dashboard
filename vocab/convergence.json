@@ -1,0 +1,12 @@
+{
+  "$comment": "Controlled vocabulary for the Convergence column, matched case-insensitively as a prefix (source rows sometimes append detail after the category, e.g. 'Drug trafficking - methamphetamine').",
+  "values": [
+    "Drug trafficking",
+    "Human trafficking",
+    "Wildlife trafficking",
+    "Illicit business",
+    "Environmental crime",
+    "Illicit goods",
+    "Criminal services"
+  ]
+}
