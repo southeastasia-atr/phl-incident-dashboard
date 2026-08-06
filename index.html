@@ -184,18 +184,10 @@
       </div>
       <div class="table-scroll">
         <table id="incidentTable">
-          <thead>
-            <tr>
-              <th data-col="Date">Date <span class="sort-icon">&#8597;</span></th>
-              <th data-col="Incident Type">Type <span class="sort-icon">&#8597;</span></th>
-              <th data-col="Title">Title <span class="sort-icon">&#8597;</span></th>
-              <th data-col="Location">Location <span class="sort-icon">&#8597;</span></th>
-              <th data-col="Arms Score">Arms Score <span class="sort-icon">&#8597;</span></th>
-            </tr>
-          </thead>
+          <thead></thead>
           <tbody id="tableBody">
             <tr class="placeholder-row">
-              <td colspan="5">Loading incidents...</td>
+              <td colspan="99">Loading incidents...</td>
             </tr>
           </tbody>
         </table>
@@ -908,6 +900,7 @@
       console.log('Loaded vocabs:', SCHEMA.vocabs);
 
       buildMapLayers(SCHEMA);
+      buildTableHead(); // generate <thead> from schema.table.columns before first render
 
       var combined = [].concat.apply([], rowsByCountry);
 
@@ -945,7 +938,7 @@
     }).catch(function(err) {
       console.error('Fetch error:', err);
       document.getElementById('tableBody').innerHTML =
-        '<tr class="placeholder-row"><td colspan="5">Error loading incident data.</td></tr>';
+        '<tr class="placeholder-row"><td colspan="99">Error loading incident data.</td></tr>';
     });
 
     // COUNTRY NAV
@@ -1255,41 +1248,150 @@ if (lines.length === 1) lines = text.split(/;/).map(function(s){ return s.trim()
       return lines.map(function(l){ return '<div class="expand-text">' + escHtml(l) + '</div>'; }).join('');
     }
 
+    // Table columns/expand fields come from schema.table, falling back to
+    // SEA's original 5-column layout if schema.json didn't load. A label
+    // override and per-column renderer registry stay in code (like the popup
+    // templates in the map layers) since exact presentation — truncation
+    // length, badge styling, numeric formatting — is display detail, not
+    // data the schema needs to carry.
+    function tableColumns() {
+      return (SCHEMA && SCHEMA.table && SCHEMA.table.columns && SCHEMA.table.columns.length)
+        ? SCHEMA.table.columns
+        : ['Date', 'Incident Type', 'Title', 'Location', 'Arms Score'];
+    }
+
+    function tableExpandFields() {
+      return (SCHEMA && SCHEMA.table && SCHEMA.table.expandFields && SCHEMA.table.expandFields.length)
+        ? SCHEMA.table.expandFields
+        : ['Description', 'Weapons'];
+    }
+
+    function columnType(name) {
+      var colDef = SCHEMA && (SCHEMA.columns || []).filter(function(c) { return c.name === name; })[0];
+      return colDef ? colDef.type : 'text';
+    }
+
+    var TABLE_LABEL_OVERRIDES = { 'Incident Type': 'Type' };
+
+    var TABLE_CELL_RENDERERS = {
+      'Incident Type': function(row) {
+        var color = typeColor(row['Incident Type']);
+        return { html: '<span class="type-badge" style="background:' + color + '">' + escHtml(row['Incident Type'] || '--') + '</span>' };
+      },
+      'Title': function(row) {
+        var title = row['Title'] || '--';
+        var short = title.length > 90 ? title.substring(0, 90) + '...' : title;
+        return { html: escHtml(short), title: title };
+      },
+      'Location': function(row) {
+        var loc = row['Location'] || '--';
+        var short = loc.length > 40 ? loc.substring(0, 40) + '...' : loc;
+        return { html: escHtml(short), title: loc };
+      },
+      'Arms Score': function(row) {
+        return { html: row['Arms Score'] ? parseFloat(row['Arms Score']).toFixed(1) : '--' };
+      },
+    };
+
+    function renderTableCell(row, col) {
+      var renderer = TABLE_CELL_RENDERERS[col];
+      if (renderer) return renderer(row);
+      return { html: escHtml(row[col] || '--') };
+    }
+
+    // Per-expand-field presentation: which wrapper class to use, and whether
+    // to omit the whole section when there's nothing to show (Description)
+    // versus always showing a placeholder (Weapons — "No weapons recorded").
+    var EXPAND_FIELD_CONFIG = {
+      'Description': {
+        wrapperClass: 'expand-text',
+        skipIfEmpty: true,
+        render: function(row) { return escHtml(row['Description'] || ''); }
+      },
+      'Weapons': {
+        wrapperClass: 'expand-weapons',
+        skipIfEmpty: false,
+        render: function(row) { return buildWeaponsHtml(row); }
+      },
+    };
+
+    function renderExpandSection(row, field) {
+      var cfg = EXPAND_FIELD_CONFIG[field] || {
+        wrapperClass: 'expand-text',
+        skipIfEmpty: true,
+        render: function(r) { return escHtml(r[field] || ''); }
+      };
+      var content = cfg.render(row);
+      if (cfg.skipIfEmpty && (!content || !String(content).trim())) return '';
+      return '<div class="expand-section"><div class="expand-label">' + escHtml(field) + '</div><div class="' + cfg.wrapperClass + '">' + content + '</div></div>';
+    }
+
+    function buildTableHead() {
+      var cols = tableColumns();
+      var thead = document.querySelector('#incidentTable thead');
+      thead.innerHTML = '<tr>' + cols.map(function(col) {
+        var label = TABLE_LABEL_OVERRIDES[col] || col;
+        return '<th data-col="' + escHtml(col) + '">' + escHtml(label) + ' <span class="sort-icon">&#8597;</span></th>';
+      }).join('') + '</tr>';
+
+      thead.querySelectorAll('th[data-col]').forEach(function(th) {
+        th.addEventListener('click', function() {
+          var col = th.dataset.col;
+          if (sortCol === col) {
+            sortAsc = !sortAsc;
+          } else {
+            sortCol = col;
+            sortAsc = true;
+          }
+
+          var isNumeric = columnType(col) === 'number';
+          var sorted = incidents.slice().sort(function(a, b) {
+            var av = a[col] || '';
+            var bv = b[col] || '';
+            if (isNumeric) return sortAsc ? parseFloat(av||0) - parseFloat(bv||0) : parseFloat(bv||0) - parseFloat(av||0);
+            return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
+          });
+
+          document.querySelectorAll('.sort-icon').forEach(function(el) { el.textContent = String.fromCharCode(8597); });
+          th.querySelector('.sort-icon').textContent = sortAsc ? String.fromCharCode(8593) : String.fromCharCode(8595);
+
+          renderTable(sorted);
+        });
+      });
+    }
+
     function renderTable(rows) {
+      var cols = tableColumns();
+      var expandFields = tableExpandFields();
+      var totalCols = cols.length;
+
       var tbody = document.getElementById('tableBody');
       document.getElementById('tableCount').textContent =
         rows.length + ' incident' + (rows.length !== 1 ? 's' : '');
 
       if (!rows.length) {
-        tbody.innerHTML = '<tr class="placeholder-row"><td colspan="5">No incidents to display.</td></tr>';
+        tbody.innerHTML = '<tr class="placeholder-row"><td colspan="' + totalCols + '">No incidents to display.</td></tr>';
         return;
       }
 
       tbody.innerHTML = rows.map(function(row) {
         var origIdx = incidents.indexOf(row);
-        var color = typeColor(row['Incident Type']);
-        var title = (row['Title'] || '--');
-        var titleShort = title.length > 90 ? title.substring(0, 90) + '...' : title;
-        var loc = (row['Location'] || '--');
-        var locShort = loc.length > 40 ? loc.substring(0, 40) + '...' : loc;
-        var desc = escHtml(row['Description'] || '');
-        var weapons = buildWeaponsHtml(row);
         var isActive = origIdx === activeRowId;
 
+        var cellsHtml = cols.map(function(col) {
+          var cell = renderTableCell(row, col);
+          var titleAttr = cell.title ? ' title="' + escHtml(cell.title) + '"' : '';
+          return '<td' + titleAttr + '>' + cell.html + '</td>';
+        }).join('');
+
+        var expandHtml = expandFields.map(function(f) { return renderExpandSection(row, f); }).join('');
+
         return '<tr data-id="' + origIdx + '" class="main-row' + (isActive ? ' active' : '') + '">' +
-          '<td>' + (row['Date'] || '--') + '</td>' +
-          '<td><span class="type-badge" style="background:' + color + '">' + escHtml(row['Incident Type'] || '--') + '</span></td>' +
-          '<td title="' + escHtml(title) + '">' + escHtml(titleShort) + '</td>' +
-          '<td title="' + escHtml(loc) + '">' + escHtml(locShort) + '</td>' +
-          '<td>' + (row['Arms Score'] ? parseFloat(row['Arms Score']).toFixed(1) : '--') + '</td>' +
+          cellsHtml +
           '</tr>' +
           '<tr class="expand-row" data-expand-id="' + origIdx + '">' +
-          '<td colspan="4">' +
-          '<div class="expand-body">' +
-          (desc ? '<div class="expand-section"><div class="expand-label">Description</div><div class="expand-text">' + desc + '</div></div>' : '') +
-          '<div class="expand-section"><div class="expand-label">Weapons</div><div class="expand-weapons">' + weapons + '</div>' +
-          '</div>' +
-          '</div>' +
+          '<td colspan="' + Math.max(totalCols - 1, 1) + '">' +
+          '<div class="expand-body">' + expandHtml + '</div>' +
           '</td>' +
           (function() {
             var src = row['Source'] || '';
@@ -1358,30 +1460,9 @@ if (lines.length === 1) lines = text.split(/;/).map(function(s){ return s.trim()
       if (activeEl) activeEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     }
 
-    // COLUMN SORTING
-    document.querySelectorAll('#incidentTable thead th[data-col]').forEach(function(th) {
-      th.addEventListener('click', function() {
-        var col = th.dataset.col;
-        if (sortCol === col) {
-          sortAsc = !sortAsc;
-        } else {
-          sortCol = col;
-          sortAsc = true;
-        }
-
-        var sorted = incidents.slice().sort(function(a, b) {
-          var av = a[col] || '';
-          var bv = b[col] || '';
-          if (col === 'Arms Score') return sortAsc ? parseFloat(av||0) - parseFloat(bv||0) : parseFloat(bv||0) - parseFloat(av||0);
-          return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
-        });
-
-        document.querySelectorAll('.sort-icon').forEach(function(el) { el.textContent = String.fromCharCode(8597); });
-        th.querySelector('.sort-icon').textContent = sortAsc ? String.fromCharCode(8593) : String.fromCharCode(8595);
-
-        renderTable(sorted);
-      });
-    });
+    // Column sort-click handlers are now attached inside buildTableHead(),
+    // since the header itself is generated dynamically from schema.table.columns
+    // rather than static HTML — see buildTableHead() above.
 
     // ── ARMS SCORE HEATMAP ──────────────────────────────────────
     // Thin wrappers around armsHeatmapLayer (a createWeightedHeatmapLayer
