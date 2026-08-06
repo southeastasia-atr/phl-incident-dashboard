@@ -184,8 +184,8 @@
     "dateColumn": "Date",
     "search": ["Title", "Location", "Incident Type", "Tags", "Description", "Actors", "Weapons"],
     "multiSelect": [
-      { "column": "Incident Type", "deriveFrom": "data" },
-      { "column": "Tags",          "deriveFrom": "data" },
+      { "column": "Incident Type", "deriveFrom": "data", "label": "Type" },
+      { "column": "Tags",          "deriveFrom": "data", "label": "Tag" },
       { "column": "Actor Type",    "deriveFrom": "vocab", "vocab": "vocab/actor-type.json" }
     ]
   }
