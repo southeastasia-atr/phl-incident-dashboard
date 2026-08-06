@@ -386,30 +386,391 @@
         });
     }
 
-    loadSchema().then(function(schema) {
-      SCHEMA = schema;
-      console.log('Loaded schema.json:', SCHEMA);
-      console.log('Loaded vocabs:', SCHEMA.vocabs);
-    }).catch(function(err) {
-      // Fail soft: schema load failure doesn't block the existing dashboard,
-      // which still runs entirely on hardcoded logic at this stage.
-      console.error('Schema load error (dashboard continues on hardcoded logic for now):', err);
+    // ── GENERIC CATEGORICAL-POINTS LAYER FACTORY ──────────────────────
+    // Produces a schema-driven layer: points colored by a category column,
+    // with a toggleable legend, filtering, and a dimmed cross-country
+    // background layer. The Incidents layer and the Crime Convergence layer
+    // are now both instances of this one factory — this replaces what used
+    // to be two hand-written, near-duplicate ~150-line blocks of code.
+    function createCategoricalLayer(cfg) {
+      var sourceId    = cfg.id;
+      var bgSourceId  = cfg.id + '-bg';
+      var circlesId   = cfg.id + '-circles';
+      var haloId      = cfg.id + '-halo';
+      var bgCirclesId = cfg.id + '-bg-circles';
+
+      var colorMap     = cfg.colorMap || {};
+      var vocabKeys    = Object.keys(colorMap);
+      var defaultColor = cfg.defaultColor || '#8b949e';
+
+      var layerAdded = false;
+      var hoverPopup = null;
+      var categoryColors = {}; // legend's actual category -> color map
+      var activeCategories = cfg.legendSource === 'vocab' ? new Set(vocabKeys) : new Set();
+
+      function matchCategory(val) {
+        if (!val) return null;
+        var v = val.trim().toLowerCase();
+        for (var i = 0; i < vocabKeys.length; i++) {
+          var k = vocabKeys[i].toLowerCase();
+          var hit = cfg.matchMode === 'startsWith' ? v.startsWith(k) : v.includes(k);
+          if (hit) return vocabKeys[i];
+        }
+        return null;
+      }
+
+      function colorFor(val) {
+        var cat = matchCategory(val);
+        return cat ? colorMap[cat] : defaultColor;
+      }
+
+      // Multi-value fields (e.g. Convergence): split on common delimiters,
+      // use the color of the first segment that matches a known category.
+      function primaryColorFor(field) {
+        if (!field) return defaultColor;
+        var parts = field.split(/[,;\n\r]+/);
+        for (var i = 0; i < parts.length; i++) {
+          var col = colorFor(parts[i].trim());
+          if (col !== defaultColor) return col;
+        }
+        return defaultColor;
+      }
+
+      function toGeoJSON(rows) {
+        var src = cfg.multiValue
+          ? rows.filter(function(row) { return row[cfg.column] && row[cfg.column].trim(); })
+          : rows;
+        return {
+          type: 'FeatureCollection',
+          features: src.map(function(row, i) {
+            var raw = (row[cfg.column] || '').trim();
+            var label = cfg.multiValue
+              ? raw.split(/[,;\n\r]+/).map(function(s){ return s.trim(); }).filter(Boolean).join(', ')
+              : raw;
+            var color = cfg.multiValue ? primaryColorFor(raw) : colorFor(raw);
+            return {
+              type: 'Feature',
+              id: i,
+              geometry: {
+                type: 'Point',
+                coordinates: [parseFloat(row['Longitude']), parseFloat(row['Latitude'])]
+              },
+              properties: {
+                id: i,
+                category: raw,
+                category_label: label,
+                color: color,
+                date: row['Date'] || '',
+                title: row['Title'] || '',
+                location: row['Location'] || '',
+                incident_type: row['Incident Type'] || '',
+                score: row['Arms Score'] || '',
+                convergence: row['Convergence'] || '',
+                country: row['Country'] || '',
+              }
+            };
+          })
+        };
+      }
+
+      function add(activeRows, allRows) {
+        if (layerAdded) return;
+
+        if (allRows && allRows.length) {
+          map.addSource(bgSourceId, { type: 'geojson', data: toGeoJSON(allRows) });
+          map.addLayer({
+            id: bgCirclesId,
+            type: 'circle',
+            source: bgSourceId,
+            filter: ['!=', ['get', 'country'], activeCountry],
+            layout: cfg.startHidden ? { visibility: 'none' } : {},
+            paint: {
+              'circle-radius': ['interpolate', ['linear'], ['zoom'], 5, 4, 10, 7],
+              'circle-color': ['get', 'color'],
+              'circle-stroke-width': 1,
+              'circle-stroke-color': '#fff',
+              'circle-opacity': 0.18,
+              'circle-stroke-opacity': 0.18,
+            }
+          });
+        }
+
+        map.addSource(sourceId, { type: 'geojson', data: toGeoJSON(activeRows) });
+
+        map.addLayer({
+          id: haloId, type: 'circle', source: sourceId,
+          layout: cfg.startHidden ? { visibility: 'none' } : {},
+          paint: { 'circle-radius': 14, 'circle-color': ['get', 'color'], 'circle-opacity': 0, 'circle-blur': 0.6 }
+        });
+
+        map.addLayer({
+          id: circlesId, type: 'circle', source: sourceId,
+          layout: cfg.startHidden ? { visibility: 'none' } : {},
+          paint: {
+            'circle-radius': ['interpolate', ['linear'], ['zoom'], 5, 5, 10, 9],
+            'circle-color': ['get', 'color'],
+            'circle-stroke-width': 1.5,
+            'circle-stroke-color': '#fff',
+            'circle-opacity': 0.88,
+          }
+        });
+
+        if (cfg.interaction === 'hover-flyto') {
+          map.on('mouseenter', circlesId, function(e) {
+            map.getCanvas().style.cursor = 'pointer';
+            var props = e.features[0].properties;
+            var coords = e.features[0].geometry.coordinates.slice();
+            if (hoverPopup) hoverPopup.remove();
+            hoverPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, maxWidth: '260px', offset: 10 })
+              .setLngLat(coords)
+              .setHTML(cfg.popupBuilder(props, 'hover'))
+              .addTo(map);
+          });
+          map.on('mouseleave', circlesId, function() {
+            map.getCanvas().style.cursor = '';
+            if (hoverPopup) { hoverPopup.remove(); hoverPopup = null; }
+          });
+          map.on('click', circlesId, function(e) {
+            var props = e.features[0].properties;
+            var coords = e.features[0].geometry.coordinates.slice();
+            if (hoverPopup) { hoverPopup.remove(); hoverPopup = null; }
+            if (activePopup) activePopup.remove();
+            map.flyTo({ center: coords, zoom: 10, speed: 1.2 });
+            activePopup = new maplibregl.Popup({ maxWidth: '280px', offset: 12 })
+              .setLngLat(coords)
+              .setHTML(cfg.popupBuilder(props, 'click'))
+              .addTo(map);
+          });
+        } else {
+          map.on('click', circlesId, function(e) {
+            var props = e.features[0].properties;
+            var rowId = props.id;
+            if (activePopup) activePopup.remove();
+            activePopup = new maplibregl.Popup({ maxWidth: '280px', offset: 12 })
+              .setLngLat(e.features[0].geometry.coordinates)
+              .setHTML(cfg.popupBuilder(props, 'click'))
+              .addTo(map);
+            highlightRow(rowId);
+          });
+          map.on('mouseenter', circlesId, function() { map.getCanvas().style.cursor = 'pointer'; });
+          map.on('mouseleave', circlesId, function() { map.getCanvas().style.cursor = ''; });
+        }
+
+        layerAdded = true;
+      }
+
+      function buildLegend(rows) {
+        if (cfg.legendSource === 'vocab') {
+          categoryColors = {};
+          vocabKeys.forEach(function(k) { categoryColors[k] = colorMap[k]; });
+        } else {
+          categoryColors = {};
+          (rows || []).forEach(function(row) {
+            var t = (row[cfg.column] || 'Unknown').trim();
+            if (!categoryColors[t]) categoryColors[t] = colorFor(t);
+          });
+        }
+        if (activeCategories.size === 0) {
+          activeCategories = new Set(Object.keys(categoryColors));
+        }
+        renderLegend();
+      }
+
+      function renderLegend() {
+        var allActive = activeCategories.size === Object.keys(categoryColors).length;
+        var html = '<div class="legend-title">' + escHtml(cfg.legendTitle) + '</div>';
+        Object.entries(categoryColors).sort(function(a,b){ return a[0].localeCompare(b[0]); }).forEach(function(entry) {
+          var cat = entry[0], color = entry[1];
+          var active = activeCategories.has(cat);
+          html += '<div class="legend-row cat-legend-row" data-cat="' + escHtml(cat) + '" style="cursor:pointer;" title="Click to toggle">' +
+            '<span class="legend-swatch" style="background:' + (active ? color : 'transparent') + ';border:2px solid ' + color + ';box-sizing:border-box;transition:background .15s;"></span>' +
+            '<span class="legend-label" style="opacity:' + (active ? '1' : '0.4') + ';transition:opacity .15s;">' + escHtml(cat) + '</span>' +
+            '</div>';
+        });
+        if (!allActive) {
+          html += '<div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border);">' +
+            '<span class="cat-reset-filter" style="font-family:var(--font-ui);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--accent);cursor:pointer;">Show all</span>' +
+            '</div>';
+        }
+
+        var legend = document.getElementById('mapLegend');
+        legend.innerHTML = html;
+
+        legend.querySelectorAll('.cat-legend-row').forEach(function(row) {
+          row.addEventListener('click', function() {
+            var cat = row.dataset.cat;
+            if (activeCategories.has(cat)) {
+              if (activeCategories.size > 1) activeCategories.delete(cat);
+            } else {
+              activeCategories.add(cat);
+            }
+            renderLegend();
+            applyFilter();
+          });
+        });
+
+        var resetEl = legend.querySelector('.cat-reset-filter');
+        if (resetEl) {
+          resetEl.addEventListener('click', function() {
+            activeCategories = new Set(Object.keys(categoryColors));
+            renderLegend();
+            applyFilter();
+          });
+        }
+      }
+
+      function applyFilter() {
+        if (!layerAdded) return;
+        var totalCount = Object.keys(categoryColors).length;
+        var activeColors = Array.from(activeCategories).map(function(c) { return categoryColors[c]; });
+        var filterExpr = activeColors.length === totalCount ? null : ['in', ['get', 'color'], ['literal', activeColors]];
+        [circlesId, haloId].forEach(function(id) { if (map.getLayer(id)) map.setFilter(id, filterExpr); });
+
+        if (map.getLayer(bgCirclesId)) {
+          var countryFilterExpr = ['!=', ['get', 'country'], activeCountry];
+          var combined = filterExpr ? ['all', countryFilterExpr, filterExpr] : countryFilterExpr;
+          map.setFilter(bgCirclesId, combined);
+        }
+      }
+
+      function update(rows) {
+        if (!layerAdded) return;
+        map.getSource(sourceId).setData(toGeoJSON(rows));
+      }
+
+      function setVisible(visible) {
+        [circlesId, haloId, bgCirclesId].forEach(function(id) {
+          if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', visible ? 'visible' : 'none');
+        });
+      }
+
+      function clearHoverPopup() {
+        if (hoverPopup) { hoverPopup.remove(); hoverPopup = null; }
+      }
+
+      function clearActive() { activeCategories = new Set(); }
+      function showAll() { activeCategories = new Set(Object.keys(categoryColors)); }
+      function resetToFullVocab() { activeCategories = new Set(vocabKeys); }
+
+      return {
+        add: add,
+        buildLegend: buildLegend,
+        applyFilter: applyFilter,
+        update: update,
+        setVisible: setVisible,
+        clearHoverPopup: clearHoverPopup,
+        clearActive: clearActive,
+        showAll: showAll,
+        resetToFullVocab: resetToFullVocab,
+        get layerAdded() { return layerAdded; },
+        ids: { source: sourceId, bgSource: bgSourceId, circles: circlesId, halo: haloId, bgCircles: bgCirclesId }
+      };
+    }
+
+    // Popup templates — kept as code, not schema.json, since exact layout and
+    // behavior (hover vs. click, colored header, field order) is presentation
+    // detail. Ported verbatim from the previous hand-written popups.
+    function incidentsPopupHtml(props) {
+      return '<strong>' + props.category + '</strong>' +
+        '<div class="popup-title">' + props.title + '</div>' +
+        '<div class="popup-meta">' +
+        '<span>Date: ' + props.date + '</span>' +
+        (props.location ? '<span>' + props.location + '</span>' : '') +
+        (props.score ? '<span>Score: ' + parseFloat(props.score).toFixed(1) + '</span>' : '') +
+        (props.convergence ? '<span>Convergence: ' + props.convergence + '</span>' : '') +
+        '</div>';
+    }
+
+    function convergencePopupHtml(props, mode) {
+      var meta = mode === 'click'
+        ? '<span>' + escHtml(props.incident_type) + ' · ' + escHtml(props.date) + '</span>'
+        : '<span>' + escHtml(props.date) + '</span>';
+      return '<strong style="color:' + props.color + '">' + escHtml(props.category_label) + '</strong>' +
+        '<div class="popup-title">' + escHtml(props.title) + '</div>' +
+        '<div class="popup-meta">' + meta +
+        (props.location ? '<span>' + escHtml(props.location) + '</span>' : '') +
+        '</div>';
+    }
+
+    // Fallback config used only if schema.json fails to load, reconstructed
+    // from the legacy hardcoded constants so the dashboard still works.
+    function buildFallbackSchema() {
+      return {
+        layers: [
+          { type: 'categorical-points', id: 'incidents', label: 'Incidents', column: 'Incident Type', colorMap: TYPE_COLORS, defaultColor: DEFAULT_COLOR },
+          { type: 'categorical-points', id: 'crime-convergence', label: 'Crime Convergence', column: 'Convergence', colorMap: CONVERGENCE_COLORS, defaultColor: CONVERGENCE_DEFAULT }
+        ],
+        vocabs: {}
+      };
+    }
+
+    var incidentsLayer, convergenceLayer;
+
+    function buildMapLayers(schema) {
+      var layerDefs = (schema.layers || []).filter(function(l) { return l.type === 'categorical-points'; });
+      var incidentsDef = layerDefs.filter(function(l) { return l.id === 'incidents'; })[0]
+        || { id: 'incidents', column: 'Incident Type', colorMap: TYPE_COLORS, defaultColor: DEFAULT_COLOR };
+      var convergenceDef = layerDefs.filter(function(l) { return l.id === 'crime-convergence'; })[0]
+        || { id: 'crime-convergence', column: 'Convergence', colorMap: CONVERGENCE_COLORS, defaultColor: CONVERGENCE_DEFAULT };
+
+      incidentsLayer = createCategoricalLayer({
+        id: incidentsDef.id,
+        column: incidentsDef.column,
+        colorMap: incidentsDef.colorMap,
+        defaultColor: incidentsDef.defaultColor || DEFAULT_COLOR,
+        matchMode: 'includes',
+        multiValue: false,
+        legendSource: 'data',
+        legendTitle: 'Incident Type',
+        interaction: 'click',
+        popupBuilder: incidentsPopupHtml,
+      });
+
+      convergenceLayer = createCategoricalLayer({
+        id: convergenceDef.id,
+        column: convergenceDef.column,
+        colorMap: convergenceDef.colorMap,
+        defaultColor: convergenceDef.defaultColor || CONVERGENCE_DEFAULT,
+        matchMode: 'startsWith',
+        multiValue: true,
+        legendSource: 'vocab',
+        legendTitle: 'Crime Convergence',
+        interaction: 'hover-flyto',
+        startHidden: true,
+        popupBuilder: convergencePopupHtml,
+      });
+    }
+
+    var schemaPromise = loadSchema().catch(function(err) {
+      console.error('Schema load error — falling back to built-in legacy config:', err);
+      return buildFallbackSchema();
     });
 
-    // STEP 5: LOAD & PARSE ALL COUNTRY CSVs
-    Promise.all(
-      COUNTRY_SOURCES.map(function(src) {
-        return fetchAndParseCSV(src.file).then(function(rows) {
-          rows.forEach(function(row) {
-            row['Country'] = src.code; // tag every row with its country code
+    // STEP 5: LOAD & PARSE ALL COUNTRY CSVs (now runs alongside the schema
+    // load — map layers can't be built until both are ready)
+    Promise.all([
+      schemaPromise,
+      Promise.all(
+        COUNTRY_SOURCES.map(function(src) {
+          return fetchAndParseCSV(src.file).then(function(rows) {
+            rows.forEach(function(row) {
+              row['Country'] = src.code; // tag every row with its country code
+            });
+            return rows;
+          }).catch(function(err) {
+            console.error('Fetch error for', src.file, err);
+            return []; // fail soft — one missing country shouldn't break the others
           });
-          return rows;
-        }).catch(function(err) {
-          console.error('Fetch error for', src.file, err);
-          return []; // fail soft — one missing country shouldn't break the others
-        });
-      })
-    ).then(function(rowsByCountry) {
+        })
+      )
+    ]).then(function(results) {
+      SCHEMA = results[0];
+      var rowsByCountry = results[1];
+      console.log('Loaded schema.json:', SCHEMA);
+      console.log('Loaded vocabs:', SCHEMA.vocabs);
+
+      buildMapLayers(SCHEMA);
+
       var combined = [].concat.apply([], rowsByCountry);
 
       allIncidents = combined.filter(function(row) {
@@ -515,148 +876,26 @@
       buildMultiSelect('actor', 'msActor', ACTOR_TYPES, 'All actor types');
 
       // Reset incident-type legend so it re-derives from the new country's types
-      activeIncidentTypes = new Set();
+      incidentsLayer.clearActive();
       buildLegend();   // rebuilds legend + re-activates all types for this country
       applyFilters();  // re-filters incidents, updates map source, table, metrics, heatmap/convergence
 
       // Flip which country is dimmed vs. active in the background context layers.
-      // Must run AFTER buildLegend() so incidentTypeColors/activeIncidentTypes
-      // already reflect the new country, not the one we just switched away from.
-      if (map.getLayer('incidents-bg-circles')) {
-        applyIncidentTypeFilter();
-      }
-      if (map.getLayer('convergence-bg-circles')) {
-        applyConvergenceFilter();
-      }
+      // Must run AFTER buildLegend() so the legend/active-set already reflect
+      // the new country, not the one we just switched away from. Both calls
+      // are internally guarded (no-op if that layer hasn't been added yet).
+      incidentsLayer.applyFilter();
+      convergenceLayer.applyFilter();
 
       renderCountryNav(); // re-render nav so the active pill updates
     }
 
-    // CSV TO GEOJSON
-    function toGeoJSON(rows) {
-      return {
-        type: 'FeatureCollection',
-        features: rows.map(function(row, i) {
-          return {
-            type: 'Feature',
-            id: i,
-            geometry: {
-              type: 'Point',
-              coordinates: [parseFloat(row['Longitude']), parseFloat(row['Latitude'])]
-            },
-            properties: {
-              id:            i,
-              date:          row['Date']          || '',
-              incident_type: row['Incident Type'] || '',
-              title:         row['Title']         || '',
-              location:      row['Location']      || '',
-              score:         row['Arms Score']         || '',
-              convergence:   row['Convergence']   || '',
-              tags:          row['Tags']          || '',
-              source:        row['Source']        || '',
-              color:         typeColor(row['Incident Type']),
-              country:       row['Country']       || '',
-            }
-          };
-        })
-      };
-    }
-
     // STEP 6: ADD POINT LAYER
+    // toGeoJSON, source/layer creation, and click/hover handlers now all live
+    // inside incidentsLayer (a createCategoricalLayer instance built in
+    // buildMapLayers() once schema.json has loaded — see above).
     function addIncidentLayer() {
-      var geojson = toGeoJSON(incidents);
-
-      // Background source: ALL countries' points, undifferentiated by filters,
-      // used only to render dimmed context for non-active countries underneath
-      // the interactive active-country layer. No click/hover handlers attached.
-      map.addSource('incidents-bg', {
-        type: 'geojson',
-        data: toGeoJSON(allIncidents),
-      });
-
-      map.addLayer({
-        id: 'incidents-bg-circles',
-        type: 'circle',
-        source: 'incidents-bg',
-        filter: ['!=', ['get', 'country'], activeCountry],
-        paint: {
-          'circle-radius': [
-            'interpolate', ['linear'], ['zoom'],
-            5, 4,
-            10, 7
-          ],
-          'circle-color': ['get', 'color'],
-          'circle-stroke-width': 1,
-          'circle-stroke-color': '#fff',
-          'circle-opacity': 0.18,
-          'circle-stroke-opacity': 0.18,
-        }
-      });
-
-      map.addSource('incidents', {
-        type: 'geojson',
-        data: geojson,
-      });
-
-      map.addLayer({
-        id: 'incidents-halo',
-        type: 'circle',
-        source: 'incidents',
-        paint: {
-          'circle-radius': 14,
-          'circle-color': ['get', 'color'],
-          'circle-opacity': 0,
-          'circle-blur': 0.6,
-        }
-      });
-
-      map.addLayer({
-        id: 'incidents-circles',
-        type: 'circle',
-        source: 'incidents',
-        paint: {
-          'circle-radius': [
-            'interpolate', ['linear'], ['zoom'],
-            5, 5,
-            10, 9
-          ],
-          'circle-color': ['get', 'color'],
-          'circle-stroke-width': 1.5,
-          'circle-stroke-color': '#fff',
-          'circle-opacity': 0.88,
-        }
-      });
-
-      map.on('click', 'incidents-circles', function(e) {
-        var props = e.features[0].properties;
-        var rowId = props.id;
-
-        if (activePopup) activePopup.remove();
-
-        activePopup = new maplibregl.Popup({ maxWidth: '280px', offset: 12 })
-          .setLngLat(e.features[0].geometry.coordinates)
-          .setHTML(
-            '<strong>' + props.incident_type + '</strong>' +
-            '<div class="popup-title">' + props.title + '</div>' +
-            '<div class="popup-meta">' +
-            '<span>Date: ' + props.date + '</span>' +
-            (props.location ? '<span>' + props.location + '</span>' : '') +
-            (props.score ? '<span>Score: ' + parseFloat(props.score).toFixed(1) + '</span>' : '') +
-            (props.convergence ? '<span>Convergence: ' + props.convergence + '</span>' : '') +
-            '</div>'
-          )
-          .addTo(map);
-
-        highlightRow(rowId);
-      });
-
-      map.on('mouseenter', 'incidents-circles', function() {
-        map.getCanvas().style.cursor = 'pointer';
-      });
-      map.on('mouseleave', 'incidents-circles', function() {
-        map.getCanvas().style.cursor = '';
-      });
-
+      incidentsLayer.add(incidents, allIncidents);
       console.log('Incident layer added');
       buildLegend();
       applyFilters();
@@ -845,9 +1084,7 @@
       });
 
       // Update map layer
-      if (map.getSource('incidents')) {
-        map.getSource('incidents').setData(toGeoJSON(filtered));
-      }
+      incidentsLayer.update(filtered);
 
       currentFilteredRows = filtered;
       renderTable(filtered);
@@ -863,91 +1100,20 @@
       }
       // Update convergence layer if that tab is active
       if (activeLayer && activeLayer.value === 'crime-convergence') {
-        updateConvergenceLayer(filtered);
+        convergenceLayer.update(filtered);
       }
     }
 
     // LEGEND
-    var incidentTypeColors = {};   // built once data loads: { 'Seizure': '#00b050', … }
-    var activeIncidentTypes = new Set(); // which types are currently shown
-
+    // Thin wrappers around incidentsLayer (a createCategoricalLayer instance
+    // — see buildMapLayers() above). Kept as top-level function names since
+    // switchCountry() and the layer-tab radio handler call them by name.
     function buildLegend() {
-      // Rebuild type→color map from loaded incidents
-      incidentTypeColors = {};
-      incidents.forEach(function(row) {
-        var t = (row['Incident Type'] || 'Unknown').trim();
-        if (!incidentTypeColors[t]) incidentTypeColors[t] = typeColor(t);
-      });
-
-      // On first build (or after reset), activate all types
-      if (activeIncidentTypes.size === 0) {
-        activeIncidentTypes = new Set(Object.keys(incidentTypeColors));
-      }
-
-      renderIncidentLegend();
-    }
-
-    function renderIncidentLegend() {
-      var allActive = activeIncidentTypes.size === Object.keys(incidentTypeColors).length;
-      var html = '<div class="legend-title">Incident Type</div>';
-      Object.entries(incidentTypeColors).sort(function(a,b){ return a[0].localeCompare(b[0]); }).forEach(function(entry) {
-        var type = entry[0], color = entry[1];
-        var active = activeIncidentTypes.has(type);
-        html += '<div class="legend-row inc-legend-row" data-type="' + escHtml(type) + '" style="cursor:pointer;" title="Click to toggle">' +
-          '<span class="legend-swatch" style="background:' + (active ? color : 'transparent') + ';border:2px solid ' + color + ';box-sizing:border-box;transition:background .15s;"></span>' +
-          '<span class="legend-label" style="opacity:' + (active ? '1' : '0.4') + ';transition:opacity .15s;">' + escHtml(type) + '</span>' +
-          '</div>';
-      });
-      if (!allActive) {
-        html += '<div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border);">' +
-          '<span id="incResetFilter" style="font-family:var(--font-ui);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--accent);cursor:pointer;">Show all</span>' +
-          '</div>';
-      }
-
-      var legend = document.getElementById('mapLegend');
-      legend.innerHTML = html;
-
-      legend.querySelectorAll('.inc-legend-row').forEach(function(row) {
-        row.addEventListener('click', function() {
-          var type = row.dataset.type;
-          if (activeIncidentTypes.has(type)) {
-            if (activeIncidentTypes.size > 1) activeIncidentTypes.delete(type);
-          } else {
-            activeIncidentTypes.add(type);
-          }
-          renderIncidentLegend();
-          applyIncidentTypeFilter();
-        });
-      });
-
-      var resetEl = legend.querySelector('#incResetFilter');
-      if (resetEl) {
-        resetEl.addEventListener('click', function() {
-          activeIncidentTypes = new Set(Object.keys(incidentTypeColors));
-          renderIncidentLegend();
-          applyIncidentTypeFilter();
-        });
-      }
+      incidentsLayer.buildLegend(incidents);
     }
 
     function applyIncidentTypeFilter() {
-      if (!map.getLayer('incidents-circles')) return;
-      var activeColors = Array.from(activeIncidentTypes).map(function(t) { return incidentTypeColors[t]; });
-      var typeFilterExpr = activeColors.length === Object.keys(incidentTypeColors).length
-        ? null
-        : ['in', ['get', 'color'], ['literal', activeColors]];
-      ['incidents-circles', 'incidents-halo'].forEach(function(id) {
-        if (map.getLayer(id)) map.setFilter(id, typeFilterExpr);
-      });
-
-      // Background layer: combine the same type filter with the country-dimming filter
-      if (map.getLayer('incidents-bg-circles')) {
-        var countryFilterExpr = ['!=', ['get', 'country'], activeCountry];
-        var combined = typeFilterExpr
-          ? ['all', countryFilterExpr, typeFilterExpr]
-          : countryFilterExpr;
-        map.setFilter('incidents-bg-circles', combined);
-      }
+      incidentsLayer.applyFilter();
     }
 
     // STEP 7: RENDER TABLE
@@ -1237,242 +1403,24 @@ if (lines.length === 1) lines = text.split(/;/).map(function(s){ return s.trim()
     }
 
     // ── CRIME CONVERGENCE LAYER ──────────────────────────────────
-    var convergenceLayerAdded = false;
-    var convergenceHoverPopup = null;
-    var convergenceActiveCategories = new Set(Object.keys(CONVERGENCE_COLORS));
-
-    function toConvergenceGeoJSON(rows) {
-      return {
-        type: 'FeatureCollection',
-        features: rows
-          .filter(function(row) { return row['Convergence'] && row['Convergence'].trim(); })
-          .map(function(row, i) {
-            var conv = (row['Convergence'] || '').trim();
-            var cats = conv.split(/[,;\n\r]+/).map(function(s){ return s.trim(); }).filter(Boolean);
-            return {
-              type: 'Feature',
-              id: i,
-              geometry: {
-                type: 'Point',
-                coordinates: [parseFloat(row['Longitude']), parseFloat(row['Latitude'])]
-              },
-              properties: {
-                convergence_raw:   conv,
-                convergence_label: cats.join(', '),
-                conv_color:        primaryConvergenceColor(conv),
-                title:             row['Title']         || '',
-                date:              row['Date']          || '',
-                incident_type:     row['Incident Type'] || '',
-                location:          row['Location']      || '',
-                country:           row['Country']       || '',
-              }
-            };
-          })
-      };
-    }
-
-    function addConvergenceLayer() {
-      if (convergenceLayerAdded) return;
-
-      // Background source: all countries' convergence points, used only to render
-      // dimmed context for the non-active country. No click/hover interactivity.
-      if (allIncidents.length) {
-        map.addSource('incidents-convergence-bg', {
-          type: 'geojson',
-          data: toConvergenceGeoJSON(allIncidents),
-        });
-
-        map.addLayer({
-          id: 'convergence-bg-circles',
-          type: 'circle',
-          source: 'incidents-convergence-bg',
-          filter: ['!=', ['get', 'country'], activeCountry],
-          layout: { visibility: 'none' },
-          paint: {
-            'circle-radius': ['interpolate', ['linear'], ['zoom'], 5, 4, 10, 7],
-            'circle-color': ['get', 'conv_color'],
-            'circle-stroke-width': 1,
-            'circle-stroke-color': '#fff',
-            'circle-opacity': 0.18,
-            'circle-stroke-opacity': 0.18,
-          }
-        }); // no beforeId needed — added first, so it naturally sits below convergence-halo/circles added next
-      }
-
-      map.addSource('incidents-convergence', {
-        type: 'geojson',
-        data: toConvergenceGeoJSON(incidents),
-      });
-
-      map.addLayer({
-        id: 'convergence-halo',
-        type: 'circle',
-        source: 'incidents-convergence',
-        layout: { visibility: 'none' },
-        paint: {
-          'circle-radius': 14,
-          'circle-color': ['get', 'conv_color'],
-          'circle-opacity': 0,
-          'circle-blur': 0.6,
-        }
-      });
-
-      map.addLayer({
-        id: 'convergence-circles',
-        type: 'circle',
-        source: 'incidents-convergence',
-        layout: { visibility: 'none' },
-        paint: {
-          'circle-radius': ['interpolate', ['linear'], ['zoom'], 5, 5, 10, 9],
-          'circle-color': ['get', 'conv_color'],
-          'circle-stroke-width': 1.5,
-          'circle-stroke-color': '#fff',
-          'circle-opacity': 0.88,
-        }
-      });
-
-      // Hover tooltip (no close button, follows cursor)
-      map.on('mouseenter', 'convergence-circles', function(e) {
-        map.getCanvas().style.cursor = 'pointer';
-        var props = e.features[0].properties;
-        var coords = e.features[0].geometry.coordinates.slice();
-        if (convergenceHoverPopup) convergenceHoverPopup.remove();
-        convergenceHoverPopup = new maplibregl.Popup({
-          closeButton: false, closeOnClick: false, maxWidth: '260px', offset: 10
-        })
-          .setLngLat(coords)
-          .setHTML(
-            '<strong style="color:' + props.conv_color + '">' + escHtml(props.convergence_label) + '</strong>' +
-            '<div class="popup-title">' + escHtml(props.title) + '</div>' +
-            '<div class="popup-meta">' +
-            '<span>' + escHtml(props.date) + '</span>' +
-            (props.location ? '<span>' + escHtml(props.location) + '</span>' : '') +
-            '</div>'
-          )
-          .addTo(map);
-      });
-
-      map.on('mouseleave', 'convergence-circles', function() {
-        map.getCanvas().style.cursor = '';
-        if (convergenceHoverPopup) { convergenceHoverPopup.remove(); convergenceHoverPopup = null; }
-      });
-
-      // Click → fly + sticky popup
-      map.on('click', 'convergence-circles', function(e) {
-        var props = e.features[0].properties;
-        var coords = e.features[0].geometry.coordinates.slice();
-        if (convergenceHoverPopup) { convergenceHoverPopup.remove(); convergenceHoverPopup = null; }
-        if (activePopup) activePopup.remove();
-        map.flyTo({ center: coords, zoom: 10, speed: 1.2 });
-        activePopup = new maplibregl.Popup({ maxWidth: '280px', offset: 12 })
-          .setLngLat(coords)
-          .setHTML(
-            '<strong style="color:' + props.conv_color + '">' + escHtml(props.convergence_label) + '</strong>' +
-            '<div class="popup-title">' + escHtml(props.title) + '</div>' +
-            '<div class="popup-meta">' +
-            '<span>' + escHtml(props.incident_type) + ' · ' + escHtml(props.date) + '</span>' +
-            (props.location ? '<span>' + escHtml(props.location) + '</span>' : '') +
-            '</div>'
-          )
-          .addTo(map);
-      });
-
-      convergenceLayerAdded = true;
-    }
-
-    function buildConvergenceLegend() {
-      var legend = document.getElementById('mapLegend');
-      var allActive = convergenceActiveCategories.size === Object.keys(CONVERGENCE_COLORS).length;
-      var html = '<div class="legend-title">Crime Convergence</div>';
-      Object.entries(CONVERGENCE_COLORS).forEach(function(entry) {
-        var cat = entry[0], color = entry[1];
-        var active = convergenceActiveCategories.has(cat);
-        html += '<div class="legend-row conv-legend-row" data-cat="' + escHtml(cat) + '" style="cursor:pointer;" title="Click to toggle">' +
-          '<span class="legend-swatch" style="background:' + (active ? color : 'transparent') + ';border:2px solid ' + color + ';box-sizing:border-box;transition:background .15s;"></span>' +
-          '<span class="legend-label" style="opacity:' + (active ? '1' : '0.4') + ';transition:opacity .15s;">' + escHtml(cat) + '</span>' +
-          '</div>';
-      });
-      if (!allActive) {
-        html += '<div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border);">' +
-          '<span id="convResetFilter" style="font-family:var(--font-ui);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--accent);cursor:pointer;">Show all</span>' +
-          '</div>';
-      }
-      legend.innerHTML = html;
-
-      legend.querySelectorAll('.conv-legend-row').forEach(function(row) {
-        row.addEventListener('click', function() {
-          var cat = row.dataset.cat;
-          if (convergenceActiveCategories.has(cat)) {
-            if (convergenceActiveCategories.size > 1) convergenceActiveCategories.delete(cat);
-          } else {
-            convergenceActiveCategories.add(cat);
-          }
-          buildConvergenceLegend();
-          applyConvergenceFilter();
-        });
-      });
-
-      var resetEl = legend.querySelector('#convResetFilter');
-      if (resetEl) {
-        resetEl.addEventListener('click', function() {
-          convergenceActiveCategories = new Set(Object.keys(CONVERGENCE_COLORS));
-          buildConvergenceLegend();
-          applyConvergenceFilter();
-        });
-      }
-    }
-
-    function applyConvergenceFilter() {
-      if (!convergenceLayerAdded) return;
-      var active = Array.from(convergenceActiveCategories);
-      var activeColors = active.map(function(cat) { return CONVERGENCE_COLORS[cat]; });
-      var categoryFilterExpr = activeColors.length === Object.keys(CONVERGENCE_COLORS).length
-        ? null
-        : ['in', ['get', 'conv_color'], ['literal', activeColors]];
-      ['convergence-circles', 'convergence-halo'].forEach(function(id) {
-        if (map.getLayer(id)) map.setFilter(id, categoryFilterExpr);
-      });
-
-      // Background layer: combine the same category filter with the country-dimming filter
-      if (map.getLayer('convergence-bg-circles')) {
-        var countryFilterExpr = ['!=', ['get', 'country'], activeCountry];
-        var combined = categoryFilterExpr
-          ? ['all', countryFilterExpr, categoryFilterExpr]
-          : countryFilterExpr;
-        map.setFilter('convergence-bg-circles', combined);
-      }
-    }
-
+    // Thin wrappers around convergenceLayer (a createCategoricalLayer
+    // instance — see buildMapLayers() above). All the source/layer creation,
+    // hover/click popups, legend, and filtering logic that used to be
+    // hand-written here now lives once, shared with the Incidents layer.
     function activateConvergenceTab() {
-      ['incidents-circles', 'incidents-halo', 'incidents-bg-circles'].forEach(function(id) {
-        if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'none');
-      });
-      addConvergenceLayer();
-      updateConvergenceLayer(currentFilteredRows);
-      buildConvergenceLegend();
-      applyConvergenceFilter();
-    }
-
-    function updateConvergenceLayer(rows) {
-      if (!convergenceLayerAdded) return;
-      map.getSource('incidents-convergence').setData(toConvergenceGeoJSON(rows));
-      ['convergence-circles', 'convergence-halo'].forEach(function(id) {
-        if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'visible');
-      });
-      if (map.getLayer('convergence-bg-circles')) {
-        map.setLayoutProperty('convergence-bg-circles', 'visibility', 'visible');
-      }
+      incidentsLayer.setVisible(false);
+      convergenceLayer.add(currentFilteredRows, allIncidents);
+      convergenceLayer.update(currentFilteredRows);
+      convergenceLayer.setVisible(true);
+      convergenceLayer.buildLegend(currentFilteredRows);
+      convergenceLayer.applyFilter();
     }
 
     function deactivateConvergenceTab() {
-      ['convergence-circles', 'convergence-halo', 'convergence-bg-circles'].forEach(function(id) {
-        if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'none');
-      });
-      ['incidents-circles', 'incidents-halo', 'incidents-bg-circles'].forEach(function(id) {
-        if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'visible');
-      });
-      if (convergenceHoverPopup) { convergenceHoverPopup.remove(); convergenceHoverPopup = null; }
-      convergenceActiveCategories = new Set(Object.keys(CONVERGENCE_COLORS));
+      convergenceLayer.setVisible(false);
+      incidentsLayer.setVisible(true);
+      convergenceLayer.clearHoverPopup();
+      convergenceLayer.resetToFullVocab();
     }
     document.querySelectorAll('.layer-btn input').forEach(function(radio) {
       radio.addEventListener('change', function(e) {
@@ -1489,7 +1437,7 @@ if (lines.length === 1) lines = text.split(/;/).map(function(s){ return s.trim()
         if (val !== 'crime-convergence') deactivateConvergenceTab();
         // Reset incident type filter when leaving that tab
         if (val !== 'incidents') {
-          activeIncidentTypes = new Set(Object.keys(incidentTypeColors));
+          incidentsLayer.showAll();
           applyIncidentTypeFilter();
         }
 
