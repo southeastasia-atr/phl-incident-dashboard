@@ -698,16 +698,120 @@
       return {
         layers: [
           { type: 'categorical-points', id: 'incidents', label: 'Incidents', column: 'Incident Type', colorMap: TYPE_COLORS, defaultColor: DEFAULT_COLOR },
-          { type: 'categorical-points', id: 'crime-convergence', label: 'Crime Convergence', column: 'Convergence', colorMap: CONVERGENCE_COLORS, defaultColor: CONVERGENCE_DEFAULT }
+          { type: 'categorical-points', id: 'crime-convergence', label: 'Crime Convergence', column: 'Convergence', colorMap: CONVERGENCE_COLORS, defaultColor: CONVERGENCE_DEFAULT },
+          { type: 'weighted-heatmap', id: 'arms-score', label: 'Arms Score', column: 'Arms Score', maxWeight: 50, legendCaption: 'Weighted by Arms Score per incident' }
         ],
         vocabs: {}
       };
     }
 
-    var incidentsLayer, convergenceLayer;
+    // ── GENERIC WEIGHTED-HEATMAP LAYER FACTORY ─────────────────────────
+    // A heatmap weighted by a numeric column (Arms Score for SEA). It reuses
+    // an existing categorical-points layer's map source rather than creating
+    // its own — that source's GeoJSON already carries a 'score' property
+    // (populated from whichever column that layer's schema entry points at,
+    // conventionally the same numeric field this heatmap weights by), so no
+    // separate data fetch or source is needed. A client schema with no
+    // numeric score column simply omits a weighted-heatmap layer entirely —
+    // buildMapLayers() below only creates this instance if one is declared.
+    function createWeightedHeatmapLayer(cfg) {
+      var heatmapId   = cfg.id + '-heatmap';
+      var heatmapBgId = cfg.id + '-heatmap-bg';
+      var added = false;
+
+      function paintFor(opacity) {
+        return {
+          'heatmap-weight': ['interpolate', ['linear'], ['to-number', ['get', 'score'], 0], 0, 0, cfg.maxWeight, 1],
+          'heatmap-intensity': ['interpolate', ['linear'], ['zoom'], 4, 0.6, 10, 2.5],
+          'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 4, 18, 10, 40],
+          'heatmap-color': [
+            'interpolate', ['linear'], ['heatmap-density'],
+            0,    'rgba(26,26,46,0)',
+            0.15, '#3b1054',
+            0.35, '#6b2d8b',
+            0.55, '#b5367a',
+            0.70, '#e8602c',
+            0.85, '#f5a623',
+            1.0,  '#fef200'
+          ],
+          'heatmap-opacity': opacity,
+        };
+      }
+
+      function add() {
+        if (added) return;
+        var srcIds = cfg.sourceLayer.ids;
+        if (!map.getSource(srcIds.source)) return;
+
+        if (map.getSource(srcIds.bgSource)) {
+          map.addLayer({
+            id: heatmapBgId,
+            type: 'heatmap',
+            source: srcIds.bgSource,
+            filter: ['!=', ['get', 'country'], activeCountry],
+            layout: { visibility: 'none' },
+            paint: paintFor(0.22), // dimmed — context only, not the focus
+          }, srcIds.halo); // insert below incident points, same as the active heatmap
+        }
+
+        map.addLayer({
+          id: heatmapId,
+          type: 'heatmap',
+          source: srcIds.source,
+          layout: { visibility: 'none' },
+          paint: paintFor(0.85),
+        }, srcIds.halo);
+
+        added = true;
+      }
+
+      function renderLegend() {
+        var HEAT_BREAKS = ['#3b1054', '#6b2d8b', '#b5367a', '#e8602c', '#f5a623', '#fef200'];
+        var gradientStops = HEAT_BREAKS.join(', ');
+        var legend = document.getElementById('mapLegend');
+        legend.innerHTML =
+          '<div class="legend-title">' + escHtml(cfg.legendTitle) + '</div>' +
+          '<div style="height:10px;border-radius:4px;background:linear-gradient(to right,' + gradientStops + ');margin:6px 0 4px;"></div>' +
+          '<div style="display:flex;justify-content:space-between;font-size:10px;color:#8b949e;">' +
+          '<span>Low</span><span>High</span></div>' +
+          '<div style="font-size:10px;color:#484f58;margin-top:6px;">' + escHtml(cfg.legendCaption) + '</div>';
+      }
+
+      function show() {
+        if (!added) return;
+        map.setLayoutProperty(heatmapId, 'visibility', 'visible');
+        if (map.getLayer(heatmapBgId)) {
+          map.setLayoutProperty(heatmapBgId, 'visibility', 'visible');
+          map.setFilter(heatmapBgId, ['!=', ['get', 'country'], activeCountry]);
+        }
+      }
+
+      function activate() {
+        cfg.sourceLayer.setVisible(false);
+        add();
+        show();
+        renderLegend();
+      }
+
+      function deactivate() {
+        cfg.sourceLayer.setVisible(true);
+        if (map.getLayer(heatmapId)) map.setLayoutProperty(heatmapId, 'visibility', 'none');
+        if (map.getLayer(heatmapBgId)) map.setLayoutProperty(heatmapBgId, 'visibility', 'none');
+      }
+
+      // update() ignores its argument: the heatmap reads the same source the
+      // categorical layer already refreshed via its own update(rows) call in
+      // applyFilters() — this just re-asserts visibility/filter state.
+      function update() { show(); }
+
+      return { activate: activate, deactivate: deactivate, update: update };
+    }
+
+    var incidentsLayer, convergenceLayer, armsHeatmapLayer;
 
     function buildMapLayers(schema) {
       var layerDefs = (schema.layers || []).filter(function(l) { return l.type === 'categorical-points'; });
+
       var incidentsDef = layerDefs.filter(function(l) { return l.id === 'incidents'; })[0]
         || { id: 'incidents', column: 'Incident Type', colorMap: TYPE_COLORS, defaultColor: DEFAULT_COLOR };
       var convergenceDef = layerDefs.filter(function(l) { return l.id === 'crime-convergence'; })[0]
@@ -739,6 +843,20 @@
         startHidden: true,
         popupBuilder: convergencePopupHtml,
       });
+
+      // Weighted-heatmap is optional — a client schema with no numeric score
+      // column simply omits this layer type, and armsHeatmapLayer stays
+      // undefined. The layer-tab radio handler guards every call accordingly.
+      var heatmapDef = (schema.layers || []).filter(function(l) { return l.type === 'weighted-heatmap'; })[0];
+      if (heatmapDef) {
+        armsHeatmapLayer = createWeightedHeatmapLayer({
+          id: heatmapDef.id || 'arms-score',
+          maxWeight: heatmapDef.maxWeight || 50,
+          legendTitle: (heatmapDef.label || 'Arms Score') + ' Intensity',
+          legendCaption: heatmapDef.legendCaption || ('Weighted by ' + (heatmapDef.column || 'score') + ' per incident'),
+          sourceLayer: incidentsLayer,
+        });
+      }
     }
 
     var schemaPromise = loadSchema().catch(function(err) {
@@ -1258,148 +1376,20 @@ if (lines.length === 1) lines = text.split(/;/).map(function(s){ return s.trim()
     });
 
     // ── ARMS SCORE HEATMAP ──────────────────────────────────────
-    var armsHeatmapAdded = false;
-
-    function addArmsHeatmapLayer() {
-      if (armsHeatmapAdded) return;
-      if (!map.getSource('incidents')) return;
-
-      // Background heatmap: non-active country, low intensity, for regional context
-      if (map.getSource('incidents-bg')) {
-        map.addLayer({
-          id: 'arms-heatmap-bg',
-          type: 'heatmap',
-          source: 'incidents-bg',
-          filter: ['!=', ['get', 'country'], activeCountry],
-          layout: { visibility: 'none' },
-          paint: {
-            'heatmap-weight': [
-              'interpolate', ['linear'],
-              ['to-number', ['get', 'score'], 0],
-              0,  0,
-              50, 1
-            ],
-            'heatmap-intensity': [
-              'interpolate', ['linear'], ['zoom'],
-              4, 0.6,
-              10, 2.5
-            ],
-            'heatmap-radius': [
-              'interpolate', ['linear'], ['zoom'],
-              4, 18,
-              10, 40
-            ],
-            'heatmap-color': [
-              'interpolate', ['linear'],
-              ['heatmap-density'],
-              0,    'rgba(26,26,46,0)',
-              0.15, '#3b1054',
-              0.35, '#6b2d8b',
-              0.55, '#b5367a',
-              0.70, '#e8602c',
-              0.85, '#f5a623',
-              1.0,  '#fef200'
-            ],
-            'heatmap-opacity': 0.22 // dimmed — context only, not the focus
-          }
-        }, 'incidents-halo'); // insert below incident points (same as the active heatmap)
-      }
-
-      map.addLayer({
-        id: 'arms-heatmap',
-        type: 'heatmap',
-        source: 'incidents',
-        layout: { visibility: 'none' },
-        paint: {
-          // Weight each point by its Arms Score (normalised — score 50+ = full weight)
-          'heatmap-weight': [
-            'interpolate', ['linear'],
-            ['to-number', ['get', 'score'], 0],
-            0,  0,
-            50, 1
-          ],
-          // Intensity scales with zoom
-          'heatmap-intensity': [
-            'interpolate', ['linear'], ['zoom'],
-            4, 0.6,
-            10, 2.5
-          ],
-          // Radius grows with zoom
-          'heatmap-radius': [
-            'interpolate', ['linear'], ['zoom'],
-            4, 18,
-            10, 40
-          ],
-          // Purple (low) → yellow (high) color ramp
-          'heatmap-color': [
-            'interpolate', ['linear'],
-            ['heatmap-density'],
-            0,    'rgba(26,26,46,0)',
-            0.15, '#3b1054',
-            0.35, '#6b2d8b',
-            0.55, '#b5367a',
-            0.70, '#e8602c',
-            0.85, '#f5a623',
-            1.0,  '#fef200'
-          ],
-          'heatmap-opacity': 0.85
-        }
-      }, 'incidents-halo'); // insert below incident points
-
-      armsHeatmapAdded = true;
-    }
-
+    // Thin wrappers around armsHeatmapLayer (a createWeightedHeatmapLayer
+    // instance — see buildMapLayers() above). Guarded with `if
+    // (armsHeatmapLayer)` since a client schema without a weighted-heatmap
+    // layer leaves it undefined and this tab simply has nothing to activate.
     function activateArmsScoreTab() {
-      // Hide incident point layers
-      ['incidents-circles', 'incidents-halo', 'incidents-bg-circles'].forEach(function(id) {
-        if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'none');
-      });
-
-      // Add heatmap layer on first use
-      addArmsHeatmapLayer();
-
-      // Show heatmap with current filtered data
-      updateArmsHeatmap(currentFilteredRows);
-
-      // Build legend
-      var HEAT_BREAKS = [
-        { label: 'Low',    color: '#3b1054' },
-        { label: '',       color: '#6b2d8b' },
-        { label: '',       color: '#b5367a' },
-        { label: '',       color: '#e8602c' },
-        { label: '',       color: '#f5a623' },
-        { label: 'High',   color: '#fef200' },
-      ];
-      var gradientStops = HEAT_BREAKS.map(function(b) { return b.color; }).join(', ');
-      var legend = document.getElementById('mapLegend');
-      legend.innerHTML =
-        '<div class="legend-title">Arms Score Intensity</div>' +
-        '<div style="height:10px;border-radius:4px;background:linear-gradient(to right,' + gradientStops + ');margin:6px 0 4px;"></div>' +
-        '<div style="display:flex;justify-content:space-between;font-size:10px;color:#8b949e;">' +
-        '<span>Low</span><span>High</span></div>' +
-        '<div style="font-size:10px;color:#484f58;margin-top:6px;">Weighted by Arms Score per incident</div>';
+      if (armsHeatmapLayer) armsHeatmapLayer.activate();
     }
 
     function updateArmsHeatmap(rows) {
-      if (!armsHeatmapAdded) return;
-      // Re-use the incidents source — already filtered — just toggle visibility
-      map.setLayoutProperty('arms-heatmap', 'visibility', 'visible');
-      if (map.getLayer('arms-heatmap-bg')) {
-        map.setLayoutProperty('arms-heatmap-bg', 'visibility', 'visible');
-        map.setFilter('arms-heatmap-bg', ['!=', ['get', 'country'], activeCountry]);
-      }
+      if (armsHeatmapLayer) armsHeatmapLayer.update(rows);
     }
 
     function deactivateArmsScoreTab() {
-      ['incidents-circles', 'incidents-halo', 'incidents-bg-circles'].forEach(function(id) {
-        if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'visible');
-      });
-      if (map.getLayer('arms-heatmap')) {
-        map.setLayoutProperty('arms-heatmap', 'visibility', 'none');
-      }
-      if (map.getLayer('arms-heatmap-bg')) {
-        map.setLayoutProperty('arms-heatmap-bg', 'visibility', 'none');
-      }
+      if (armsHeatmapLayer) armsHeatmapLayer.deactivate();
     }
 
     // ── CRIME CONVERGENCE LAYER ──────────────────────────────────
